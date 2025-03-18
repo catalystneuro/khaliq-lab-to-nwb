@@ -1,20 +1,18 @@
 """Primary NWBConverter class for this dataset."""
-from nwb_conversion_tools import (
-    NWBConverter,
+from neuroconv import NWBConverter
+from neuroconv.datainterfaces import (
     SpikeGLXRecordingInterface,
-    SpikeGLXLFPInterface,
     PhySortingInterface,
 )
 
-from my_lab_to_nwb.my_ecephys_dataset import MyEcephysBehaviorInterface
+from .embargo2002a import Embargo2002ABehaviorInterface
 
 
-class MyEcephysDatasetNWBConverter(NWBConverter):
+class Embargo2002ANWBConverter(NWBConverter):
     """Primary conversion class for my extracellular electrophysiology dataset."""
 
     data_interface_classes = dict(
         Recording=SpikeGLXRecordingInterface,
-        LFP=SpikeGLXLFPInterface,
         Sorting=PhySortingInterface,
-        Behavior=MyEcephysBehaviorInterface,
+        Behavior=Embargo2002ABehaviorInterface,
     )
