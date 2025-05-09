@@ -1,9 +1,11 @@
-name: khaliq_lab_to_nwb_env
+name: khaliq_lab
 channels:
-- conda-forge
-- defaults
+  - conda-forge
+  - defaults
 dependencies:
-- python>=3.11
-- pip
-- pip:
-  - --editable .  # This calls the setup and therefore requirements minimal
+  - python>=3.11
+  - pip
+  - jupyterlab
+  - ipykernel
+  - pip:
+      - --editable . # This calls the setup and therefore requirements minimal

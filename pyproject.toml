@@ -8,10 +8,8 @@ maintainers = [
   { name = "CatalystNeuro", email = "ben.dichter@catalystneuro.com" },
 ]
 license = { file = "LICENSE" }
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 classifiers = [
-  "Programming Language :: Python :: 3.9",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
 ]
@@ -20,11 +18,6 @@ dependencies = ["neuroconv", "nwbinspector", "pyabf==2.3.8"]
 
 [project.urls]
 Repository = "https://github.com/catalystneuro/khaliq-lab-to-nwb"
-
-[project.optional-dependencies]
-embargo2002a = [
-  "neuroconv==0.2.0", # Pinned dependencies to specific versions
-]
 
 [build-system]
 requires = ["setuptools"]
