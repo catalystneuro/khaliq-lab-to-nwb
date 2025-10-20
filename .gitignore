@@ -158,3 +158,6 @@ dmypy.json
 
 # Data directory (symbolic link)
 /data
+
+# Scope of work PDF
+src/khaliq_lab_to_nwb/conversion_abf/assets/Khaliq Lab Scope of Work.pdf

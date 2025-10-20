@@ -22,8 +22,10 @@ classifiers = [
 ]
 requires-python = ">=3.13"
 dependencies = [
+    "neo>=0.15.0.dev0",
     "neuroconv>0.8",
     "nwbinspector",
+    "openpyxl>=3.1.5",
 ]
 
 [project.urls]
@@ -43,6 +45,7 @@ dev = [
 
 [tool.uv.sources]
 neuroconv = { path = "../../work_repos/neuroconv", editable = true }
+neo = { path = "../../work_repos/python-neo", editable = true }
 
 [tool.black]
 line-length = 120
