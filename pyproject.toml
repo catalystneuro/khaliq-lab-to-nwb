@@ -42,7 +42,7 @@ dev = [
 
 
 [tool.uv.sources]
-neuroconv = { path = "../work_repos/neuroconv", editable = true }
+neuroconv = { path = "../../work_repos/neuroconv", editable = true }
 
 [tool.black]
 line-length = 120

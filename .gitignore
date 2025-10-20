@@ -155,3 +155,6 @@ dmypy.json
 **.nwb
 
 **.ipynb
+
+# Data directory (symbolic link)
+/data
