@@ -1,38 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "khaliq-lab-to-nwb"
 version = "0.0.1"
-description = "NWB conversion scripts, functions, and classes for Khaliq  conversion"
+description = "NWB conversion scripts, functions, and classes for Khaliq conversion"
 readme = "README.md"
-authors = [{ name = "CatalystNeuro", email = "ben.dichter@catalystneuro.com" }]
-maintainers = [
-  { name = "CatalystNeuro", email = "ben.dichter@catalystneuro.com" },
+license = {file = "LICENSE"}
+authors = [
+    {name = "CatalystNeuro", email = "ben.dichter@catalystneuro.com"},
 ]
-license = { file = "LICENSE" }
-requires-python = ">=3.11"
 classifiers = [
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
 ]
-
-dependencies = ["neuroconv", "nwbinspector", "pyabf==2.3.8"]
+requires-python = ">=3.13"
+dependencies = [
+    "neuroconv>0.8",
+    "nwbinspector",
+]
 
 [project.urls]
+Homepage = "https://github.com/catalystneuro/khaliq-lab-to-nwb"
 Repository = "https://github.com/catalystneuro/khaliq-lab-to-nwb"
 
-[build-system]
-requires = ["setuptools"]
-build-backend = "setuptools.build_meta"
+[tool.hatch.build.targets.wheel]
+packages = ["src/khaliq_lab_to_nwb"]
 
-[tool.setuptools]
-include-package-data = true
+[dependency-groups]
+dev = [
+    "ipykernel>=6.30.1",
+    "ruff>=0.8.0",
+    "pre-commit>=3.0.0",
+]
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["*"]
+
+[tool.uv.sources]
+neuroconv = { path = "../work_repos/neuroconv", editable = true }
 
 [tool.black]
 line-length = 120
-target-version = ['py39', 'py310', 'py311']
+target-version = ['py313']
 include = '\.pyi?$'
 extend-exclude = '''
 /(
@@ -58,20 +72,24 @@ reverse_relative = true
 known_first_party = ["khaliq_lab_to_nwb"]
 
 [tool.codespell]
-skip = '.git*,*.pdf,*.css'
+skip = '*.git*,*.pdf,*.css, *.ipynb,*/assets/*,*.txt'
 check-hidden = true
-ignore-words-list = 'assertin'
+ignore-words-list = 'assertin,sems,sinlge,singl,som'
 
 [tool.ruff]
 
 [tool.ruff.lint]
 select = [
-  "F401", # Unused import
-  "I",    # All isort rules
+    "F401",  # Unused import
+    "I",     # All isort rules
+    "UP006", # non-pep585 annotation (tuple, list -> tuple, list)
+    "UP007", # non-pep604 annotation (Union[x, y] -> X | Y)
+    "UP045", # non pep604 annotation (Optional[x] -> x | None)
 ]
 fixable = ["ALL"]
 
 
 [tool.ruff.lint.isort]
 relative-imports-order = "closest-to-furthest"
-known-first-party = ["neuroconv"]
+known-first-party = ["khaliq_lab_to_nwb"]
+
