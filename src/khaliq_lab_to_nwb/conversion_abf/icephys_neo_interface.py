@@ -1,10 +1,3 @@
-"""
-Functions for adding intracellular current-clamp electrophysiology data to NWB files using Neo.
-
-This module provides direct control over how voltage (response) and current (stimulus)
-signals are mapped from ABF files to NWB's intracellular ephys structures.
-"""
-
 from neo.rawio import AxonRawIO
 from pynwb import NWBFile
 from pynwb.icephys import CurrentClampSeries, CurrentClampStimulusSeries
@@ -46,57 +39,6 @@ def add_icephys_data_from_neo_reader(
         If the specified electrode_name is not found in the NWBFile.
     ValueError
         If no voltage channel is found.
-
-    Notes
-    -----
-    **Channel Identification (by units only):**
-    - Voltage channel: mV or V → response
-    - Current channel: pA, nA, or A → stimulus
-    - Other units (C, etc.) → ignored
-
-    **Unit Conversions to SI base units:**
-    - Voltage: mV → V (divide by 1000)
-    - Current: pA → A (divide by 1e12), nA → A (divide by 1e9)
-
-    **Protocol Handling:**
-    - SF (Spontaneous Firing): Only voltage channel, no current
-    - CS/ADP protocols: Both voltage and current channels
-
-    Examples
-    --------
-    >>> from pathlib import Path
-    >>> from neo.rawio import AxonRawIO
-    >>> from pynwb import NWBFile
-    >>> from datetime import datetime
-    >>> from zoneinfo import ZoneInfo
-    >>>
-    >>> # Initialize Neo reader
-    >>> abf_path = Path("recording.abf")
-    >>> reader = AxonRawIO(filename=abf_path)
-    >>> reader.parse_header()
-    >>>
-    >>> # Get session start time from reader
-    >>> session_start_time = reader.raw_annotations['blocks'][0]['rec_datetime']
-    >>>
-    >>> # Create NWB file with electrode
-    >>> nwbfile = NWBFile(
-    ...     session_description="Test session",
-    ...     identifier="test_001",
-    ...     session_start_time=session_start_time
-    ... )
-    >>> device = nwbfile.create_device(name="MultiClamp700B")
-    >>> electrode = nwbfile.create_icephys_electrode(
-    ...     name="electrode0",
-    ...     description="Patch pipette",
-    ...     device=device
-    ... )
-    >>>
-    >>> # Add current-clamp data from Neo reader
-    >>> add_icephys_data_from_neo_reader(
-    ...     nwbfile=nwbfile,
-    ...     neo_reader=reader,
-    ...     electrode_name="electrode0"
-    ... )
     """
     # Get the electrode from the NWBFile
     if electrode_name not in nwbfile.icephys_electrodes:
