@@ -3,8 +3,14 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from neuroconv.datainterfaces import AbfInterface
+from neo.rawio import AxonRawIO
 from neuroconv.tools import configure_and_write_nwbfile
+from pynwb import NWBFile
+from pynwb.file import Subject
+
+from khaliq_lab_to_nwb.conversion_abf.icephys_neo_interface import (
+    add_icephys_data_from_neo_reader,
+)
 
 
 def load_metadata_from_csv(
@@ -237,11 +243,15 @@ def convert_session(
     # Check corruption status
     is_corrupted = check_corruption_status(abf_file_path)
 
-    # Step 1: Initialize the ABF interface
-    interface = AbfInterface(file_paths=[abf_file_path])
+    # Step 1: Initialize Neo reader
+    neo_reader = AxonRawIO(filename=abf_file_path)
+    neo_reader.parse_header()
 
-    # Step 2: Get and customize metadata
-    metadata = interface.get_metadata()
+    # Step 2: Create base metadata structure
+    metadata = {}
+    metadata["NWBFile"] = {}
+    metadata["Subject"] = {}
+    metadata["Icephys"] = {}
 
     # Map protocol abbreviations to full names
     protocol_names = {
@@ -284,29 +294,53 @@ def convert_session(
         f"{session_metadata['neuron_type']} neuron {ais_status}"
     )
 
-    # Update Icephys Electrode metadata with anatomical location and cell ID
-    if "Icephys" in metadata and "Electrodes" in metadata["Icephys"]:
-        electrode_location = f"{session_metadata['anatomical_region']} ({ais_status})"
-        for electrode in metadata["Icephys"]["Electrodes"]:
-            electrode["location"] = electrode_location
-            electrode["description"] = (
-                f"Intracellular electrode for {session_metadata['neuron_type']} neuron recording"
-            )
-            electrode["cell_id"] = (
-                f"{session_metadata['neuron_type']}_{session_metadata['cell_number']:03d}"
-            )
+    # Step 3: Create Subject
+    subject = Subject(
+        subject_id=metadata["Subject"]["subject_id"],
+        species=metadata["Subject"]["species"],
+        sex=metadata["Subject"]["sex"],
+        age=metadata["Subject"]["age"],
+        description=metadata["Subject"]["description"],
+    )
 
-    # WORKAROUND for neuroconv bug: Set icephys_experiment_type in metadata
-    # The add_to_nwbfile() method ignores the icephys_experiment_type parameter
-    # and only reads from metadata["Icephys"]["Sessions"][i]["icephys_experiment_type"]
-    # See: neuroconv_bug_report.md
-    for session in metadata["Icephys"]["Sessions"]:
-        session["icephys_experiment_type"] = "current_clamp"
+    # Step 4: Create NWB file directly
+    nwbfile = NWBFile(
+        session_description=metadata["NWBFile"]["session_description"],
+        identifier=f"cell_{cell_number:03d}_{abf_file_path.stem}",
+        session_start_time=metadata["NWBFile"]["session_start_time"],
+        experimenter=metadata["NWBFile"]["experimenter"],
+        lab=metadata["NWBFile"]["lab"],
+        institution=metadata["NWBFile"]["institution"],
+        experiment_description=metadata["NWBFile"]["experiment_description"],
+        keywords=metadata["NWBFile"]["keywords"],
+        protocol=metadata["NWBFile"]["protocol"],
+        subject=subject,
+    )
 
-    # Step 3: Create NWB file with the interface
-    nwbfile = interface.create_nwbfile(metadata=metadata)
+    # Step 5: Create device and electrode
+    device = nwbfile.create_device(
+        name="MultiClamp700B",
+        description="Molecular Devices MultiClamp 700B amplifier",
+        manufacturer="Molecular Devices",
+    )
 
-    # Step 4: Add corruption annotation ONLY if file is corrupted
+    electrode_location = f"{session_metadata['anatomical_region']} ({ais_status})"
+    nwbfile.create_icephys_electrode(
+        name="electrode0",
+        description=f"Intracellular electrode for {session_metadata['neuron_type']} neuron recording",
+        device=device,
+        location=electrode_location,
+        cell_id=f"{session_metadata['neuron_type']}_{session_metadata['cell_number']:03d}",
+    )
+
+    # Step 6: Add intracellular data using Neo reader
+    add_icephys_data_from_neo_reader(
+        nwbfile=nwbfile,
+        neo_reader=neo_reader,
+        electrode_name="electrode0",
+    )
+
+    # Step 7: Add corruption annotation ONLY if file is corrupted
     if is_corrupted:
         nwbfile.add_invalid_times_column(
             name="reason",
@@ -325,14 +359,13 @@ def convert_session(
             severity="unknown",
         )
 
-    # Step 5: Write to NWB file
+    # Step 8: Write to NWB file
     output_folder_path.mkdir(parents=True, exist_ok=True)
 
     # Generate output filename
     output_filename = f"cell_{cell_number:03d}_{abf_file_path.stem}.nwb"
     nwbfile_path = output_folder_path / output_filename
 
-    # Step 6: Write to NWB file
     configure_and_write_nwbfile(
         nwbfile=nwbfile, nwbfile_path=nwbfile_path, backend="hdf5"
     )
@@ -366,7 +399,7 @@ def main():
     session_metadata_path = assets_folder_path / "session_metadata.csv"
 
     # Example ABF file path - UPDATE THIS
-    ais_type = "with AIS component"  # or "without AIS component"
+    ais_type = "Cells with AIS component"  # or "Cells without AIS component"
     folder_date = "10 June 2021"
     cell = "C1"
     protocol = "ADP"
