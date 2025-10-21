@@ -47,6 +47,11 @@ dev = [
 neuroconv = { path = "../../work_repos/neuroconv", editable = true }
 neo = { path = "../../work_repos/python-neo", editable = true }
 
+
+[tool.uv]
+config-settings = { editable_mode = "compat" }
+
+
 [tool.black]
 line-length = 120
 target-version = ['py313']
@@ -95,4 +100,3 @@ fixable = ["ALL"]
 [tool.ruff.lint.isort]
 relative-imports-order = "closest-to-furthest"
 known-first-party = ["khaliq_lab_to_nwb"]
-

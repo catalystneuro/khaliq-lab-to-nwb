@@ -162,3 +162,6 @@ dmypy.json
 # Scope of work PDF
 src/khaliq_lab_to_nwb/conversion_abf/assets/Khaliq Lab Scope of Work.pdf
 src/khaliq_lab_to_nwb/conversion_abf/assets/Master List_Neurons.xlsx
+
+# Email communication (contains sensitive information)
+email_communication.md
