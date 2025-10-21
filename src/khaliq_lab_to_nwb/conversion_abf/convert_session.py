@@ -1,7 +1,7 @@
 from pathlib import Path
 from zoneinfo import ZoneInfo
-import pandas as pd
 
+import pandas as pd
 from neuroconv.datainterfaces import AbfInterface
 from neuroconv.tools import configure_and_write_nwbfile
 
@@ -75,24 +75,28 @@ def load_metadata_from_csv(
     else:
         session_start_time = pd.to_datetime(date_value).to_pydatetime()
 
-    # Add timezone info (assuming US Central Time for the lab)
-    session_start_time = session_start_time.replace(tzinfo=ZoneInfo("America/Chicago"))
+    # Add timezone info (NIH Bethesda, MD is in US Eastern Time)
+    session_start_time = session_start_time.replace(tzinfo=ZoneInfo("America/New_York"))
 
     # Convert common name to Latin name
     species_mapping = {
         "Rhesus Macaque": "Macaca mulatta",
         "Rhesus macaque": "Macaca mulatta",
     }
-    species_latin = species_mapping.get(cell_data["Animal Species"], cell_data["Animal Species"])
+    species_latin = species_mapping.get(
+        cell_data["Animal Species"], cell_data["Animal Species"]
+    )
 
     # Build metadata dictionary
     metadata = {
         "session_start_time": session_start_time,
-        "session_description": f"Intracellular recording from {cell_data['Neuron Type']} neuron in {cell_data['Anatomical Region']}",
-        "experimenter": ["Khaliq Lab"],
-        "lab": "Khaliq Lab",
-        "institution": "Northwestern University",
-        "experiment_description": f"Electrophysiology recording from {cell_data['Neuron Type']} neurons",
+        "cell_number": int(cell_data["Cell #"]),  # Get cell number from CSV
+        "neuron_type": cell_data["Neuron Type"],
+        "anatomical_region": cell_data["Anatomical Region"],
+        "experimenter": ["Khaliq, Zayd", "Sansalone, Lorenze"],
+        "lab": "Cellular Neurophysiology Section",
+        "institution": "National Institute of Neurological Disorders and Stroke, National Institutes of Health",
+        "experiment_description": f"Intracellular electrophysiology recording from {cell_data['Neuron Type']} neurons",
         "subject": {
             "subject_id": cell_data["Animal ID"],
             "species": species_latin,
@@ -131,7 +135,9 @@ def check_corruption_status(file_path: Path) -> bool:
     - This is used to add invalid_times annotations to NWB files
     """
     # Get the corruption CSV path relative to this script
-    corruption_csv_path = Path(__file__).parent / "assets" / "file_corruption_status.csv"
+    corruption_csv_path = (
+        Path(__file__).parent / "assets" / "file_corruption_status.csv"
+    )
     df = pd.read_csv(corruption_csv_path)
 
     # Normalize paths for comparison
@@ -177,6 +183,70 @@ def extract_cell_number_from_path(file_path: Path) -> int:
             return int(part[1:])
 
     raise ValueError(f"Could not extract cell number from path: {file_path}")
+
+
+def extract_protocol_type(file_path: Path) -> str:
+    """
+    Extract the protocol type from the ABF file path.
+
+    The Khaliq Lab data organizes recordings by protocol type in directories
+    named SF (Spontaneous Firing), CS (Current Steps), or ADP (After Depolarization).
+
+    Parameters
+    ----------
+    file_path : Path
+        Path to the ABF file, expected to have a parent directory with protocol name
+
+    Returns
+    -------
+    str
+        The protocol type abbreviation (SF, CS, or ADP)
+
+    Raises
+    ------
+    ValueError
+        If the parent directory doesn't match known protocol types
+    """
+    protocol = file_path.parent.name
+    valid_protocols = ["SF", "CS", "ADP"]
+
+    if protocol in valid_protocols:
+        return protocol
+
+    raise ValueError(f"Unknown protocol type '{protocol}' in path: {file_path}")
+
+
+def extract_ais_status(file_path: Path) -> str:
+    """
+    Extract whether the cell has an AIS (Axon Initial Segment) component.
+
+    The Khaliq Lab data is organized into two main categories based on whether
+    cells have an AIS component, indicated by the top-level directory structure.
+
+    Parameters
+    ----------
+    file_path : Path
+        Path to the ABF file
+
+    Returns
+    -------
+    str
+        Either "with AIS component" or "without AIS component"
+
+    Notes
+    -----
+    AIS (Axon Initial Segment) is the specific branching of the soma that
+    turns into an axon - this is an important cell feature for classification.
+    """
+    path_str = str(file_path)
+
+    if "with AIS component" in path_str:
+        return "with AIS component"
+    elif "without AIS component" in path_str:
+        return "without AIS component"
+    else:
+        # Default to unknown if structure is different
+        return "AIS status unknown"
 
 
 # ============================================================================
@@ -245,6 +315,10 @@ def convert_session(
     if not abf_file_path.exists():
         raise FileNotFoundError(f"ABF file not found: {abf_file_path}")
 
+    # Extract additional metadata from file path
+    protocol_type = extract_protocol_type(abf_file_path)
+    ais_status = extract_ais_status(abf_file_path)
+
     # Check corruption status
     is_corrupted = check_corruption_status(abf_file_path)
 
@@ -254,16 +328,53 @@ def convert_session(
     # Step 2: Get and customize metadata
     metadata = interface.get_metadata()
 
+    # Map protocol abbreviations to full names
+    protocol_names = {
+        "SF": "Spontaneous Firing",
+        "CS": "Current Steps",
+        "ADP": "After Depolarization",
+    }
+    protocol_full_name = protocol_names.get(protocol_type, protocol_type)
+
     # Update NWBFile metadata
     metadata["NWBFile"]["session_start_time"] = session_metadata["session_start_time"]
-    metadata["NWBFile"]["session_description"] = session_metadata["session_description"]
+    metadata["NWBFile"]["session_description"] = (
+        f"Intracellular recording from {session_metadata['neuron_type']} neuron "
+        f"({ais_status}) in {session_metadata['anatomical_region']}"
+    )
+    metadata["NWBFile"]["protocol"] = f"{protocol_full_name} ({protocol_type})"
     metadata["NWBFile"]["experimenter"] = session_metadata["experimenter"]
     metadata["NWBFile"]["lab"] = session_metadata["lab"]
     metadata["NWBFile"]["institution"] = session_metadata["institution"]
-    metadata["NWBFile"]["experiment_description"] = session_metadata["experiment_description"]
+    metadata["NWBFile"]["experiment_description"] = session_metadata[
+        "experiment_description"
+    ]
+    metadata["NWBFile"]["keywords"] = [
+        protocol_type,
+        ais_status,
+        session_metadata["neuron_type"],
+        session_metadata["anatomical_region"],
+        "patch-clamp",
+        "intracellular",
+    ]
 
     # Update Subject metadata
     metadata["Subject"].update(session_metadata["subject"])
+    metadata["Subject"]["description"] = (
+        f"{session_metadata['neuron_type']} neuron {ais_status}"
+    )
+
+    # Update Icephys Electrode metadata with anatomical location and cell ID
+    if "Icephys" in metadata and "Electrodes" in metadata["Icephys"]:
+        electrode_location = f"{session_metadata['anatomical_region']} ({ais_status})"
+        for electrode in metadata["Icephys"]["Electrodes"]:
+            electrode["location"] = electrode_location
+            electrode["description"] = (
+                f"Intracellular electrode for {session_metadata['neuron_type']} neuron recording"
+            )
+            electrode["cell_id"] = (
+                f"{session_metadata['neuron_type']}_{session_metadata['cell_number']:03d}"
+            )
 
     # WORKAROUND for neuroconv bug: Set icephys_experiment_type in metadata
     # The add_to_nwbfile() method ignores the icephys_experiment_type parameter
@@ -278,9 +389,12 @@ def convert_session(
     # Step 4: Add corruption annotation ONLY if file is corrupted
     if is_corrupted:
         nwbfile.add_invalid_times_column(
-            name="reason", description="Type of corruption or artifact detected in the data"
+            name="reason",
+            description="Type of corruption or artifact detected in the data",
         )
-        nwbfile.add_invalid_times_column(name="severity", description="Severity level of the corruption")
+        nwbfile.add_invalid_times_column(
+            name="severity", description="Severity level of the corruption"
+        )
 
         # Add a placeholder interval indicating the file has corruption
         # NOTE: Specific time intervals should be determined by detailed analysis
@@ -299,10 +413,12 @@ def convert_session(
     nwbfile_path = output_folder_path / output_filename
 
     # Step 6: Write to NWB file
-    configure_and_write_nwbfile(nwbfile=nwbfile, nwbfile_path=nwbfile_path, backend="hdf5")
-
+    configure_and_write_nwbfile(
+        nwbfile=nwbfile, nwbfile_path=nwbfile_path, backend="hdf5"
+    )
 
     return nwbfile_path
+
 
 def main():
     """
@@ -330,7 +446,10 @@ def main():
     session_metadata_path = assets_folder_path / "session_metadata.csv"
 
     # Example ABF file path - UPDATE THIS
-    abf_file_path = data_folder_path / "Electrophysiology recordings/Cells with AIS component/10 June 2021/C1/ADP/21610017.abf"
+    abf_file_path = (
+        data_folder_path
+        / "Electrophysiology recordings/Cells with AIS component/10 June 2021/C1/ADP/21610017.abf"
+    )
 
     # Extract cell number and load metadata
     cell_number = extract_cell_number_from_path(abf_file_path)
