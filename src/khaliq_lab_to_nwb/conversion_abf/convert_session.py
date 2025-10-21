@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Literal
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -7,67 +6,11 @@ from neo.rawio import AxonRawIO
 from neuroconv.tools import configure_and_write_nwbfile
 from pynwb import NWBFile
 from pynwb.file import Subject
+from tqdm import tqdm
 
 from khaliq_lab_to_nwb.conversion_abf.icephys_neo_interface import (
     add_icephys_data_from_neo_reader,
 )
-
-
-def load_metadata_from_csv(
-    cell_number: int,
-    session_metadata_path: Path,
-) -> dict:
-    """
-    Load raw metadata for a specific cell from the session metadata CSV file.
-
-    This function finds and returns the matching row from the CSV as raw, unprocessed data.
-
-    Parameters
-    ----------
-    cell_number : int
-        The cell number to look up (corresponds to "Cell #" column in CSV).
-    session_metadata_path : Path
-        Path to the session metadata CSV file.
-
-    Returns
-    -------
-    dict
-        Dictionary containing raw CSV data:
-        - "date": Recording date (str or datetime)
-        - "cell_number": Cell identifier (int)
-        - "neuron_type": Type of neuron (str)
-        - "anatomical_region": Brain region (str)
-        - "animal_id": Subject identifier (str)
-        - "animal_species": Species name (str)
-        - "sex": Subject sex (str)
-        - "age_years": Subject age in years (float)
-
-    Raises
-    ------
-    ValueError
-        If the specified cell number is not found in the session metadata.
-    """
-    df = pd.read_csv(session_metadata_path)
-
-    # Find the row for this cell
-    cell_row = df[df["Cell #"] == cell_number]
-
-    if cell_row.empty:
-        raise ValueError(f"Cell #{cell_number} not found in Master List")
-
-    cell_data = cell_row.iloc[0]
-
-    # Return raw CSV data
-    return {
-        "date": cell_data["Date"],
-        "cell_number": int(cell_data["Cell #"]),
-        "neuron_type": cell_data["Neuron Type"],
-        "anatomical_region": cell_data["Anatomical Region"],
-        "animal_id": cell_data["Animal ID"],
-        "animal_species": cell_data["Animal Species"],
-        "sex": cell_data["Sex"],
-        "age_years": float(cell_data["Animal Age (Years)"]),
-    }
 
 
 def check_corruption_status(file_path: Path) -> bool:
@@ -147,201 +90,384 @@ def extract_cell_number_from_path(file_path: Path) -> int:
     raise ValueError(f"Could not extract cell number from path: {file_path}")
 
 
+def get_cells_for_subject(subject_id: str, session_metadata_path: Path) -> list[dict]:
+    """
+    Get all cell information for a specific subject from metadata CSV.
+
+    Parameters
+    ----------
+    subject_id : str
+        Subject identifier (e.g., "#1", "#2")
+    session_metadata_path : Path
+        Path to the session metadata CSV file
+
+    Returns
+    -------
+    list[dict]
+        List of dictionaries, each containing metadata for one cell belonging to the subject
+    """
+    df = pd.read_csv(session_metadata_path)
+    subject_cells = df[df["Animal ID"] == subject_id]
+
+    if subject_cells.empty:
+        raise ValueError(f"No cells found for subject {subject_id}")
+
+    cells = []
+    for _, row in subject_cells.iterrows():
+        age_str = row["Animal Age (Years)"]
+        age_years = None if age_str == "N.A." else float(age_str)
+
+        cells.append(
+            {
+                "date": row["Date"],
+                "cell_number": int(row["Cell #"]),
+                "neuron_type": row["Neuron Type"],
+                "anatomical_region": row["Anatomical Region"],
+                "animal_id": row["Animal ID"],
+                "animal_species": row["Animal Species"],
+                "sex": row["Sex"],
+                "age_years": age_years,
+            }
+        )
+
+    return cells
+
+
+def collect_subject_files(
+    subject_id: str, session_metadata_path: Path, data_folder_path: Path
+) -> list[dict]:
+    """
+    Collect all ABF files for a specific subject.
+
+    Parameters
+    ----------
+    subject_id : str
+        Subject identifier (e.g., "#1", "#2")
+    session_metadata_path : Path
+        Path to the session metadata CSV file
+    data_folder_path : Path
+        Root folder containing electrophysiology recordings
+
+    Returns
+    -------
+    list[dict]
+        List of dictionaries, each containing:
+        - "file_path": Path to ABF file
+        - "cell_number": Cell number
+        - "cell_id": Cell ID string (e.g., "C1")
+        - "ais_status": "with AIS component" or "without AIS component"
+        - "protocol": Protocol type (SF, CS, ADP)
+        - "rec_datetime": Recording datetime from ABF file
+    """
+    # Get all cells for this subject
+    cells = get_cells_for_subject(subject_id, session_metadata_path)
+    cell_numbers = [cell["cell_number"] for cell in cells]
+
+    # Search for ABF files
+    all_files = []
+    for ais_folder in ["Cells with AIS component", "Cells without AIS component"]:
+        ais_path = data_folder_path / ais_folder
+        if not ais_path.exists():
+            continue
+
+        ais_status = (
+            "with AIS component"
+            if ais_folder == "Cells with AIS component"
+            else "without AIS component"
+        )
+
+        # Find all ABF files
+        for abf_file in ais_path.glob("**/*.abf"):
+            # Extract cell number from path
+            cell_number = extract_cell_number_from_path(abf_file)
+
+            # Skip if not belonging to this subject
+            if cell_number not in cell_numbers:
+                continue
+
+            # Skip the misplaced C3 file
+            if cell_number == 3 and abf_file.name == "21610007.abf":
+                continue
+
+            # Get protocol from parent directory
+            protocol = abf_file.parent.name
+
+            all_files.append(
+                {
+                    "file_path": abf_file,
+                    "cell_number": cell_number,
+                    "cell_id": f"C{cell_number}",
+                    "ais_status": ais_status,
+                    "protocol": protocol,
+                }
+            )
+
+    return all_files
+
+
 # ============================================================================
 # MAIN CONVERSION WORKFLOW
 # ============================================================================
 
 
-def convert_session(
-    abf_file_path: Path | str,
+def convert_subject(
+    subject_id: str,
+    session_metadata_path: Path | str,
+    data_folder_path: Path | str,
     output_folder_path: Path | str,
-    session_metadata: dict,
-    cell_number: int,
-    ais_status: Literal["with AIS component", "without AIS component"],
 ) -> Path:
     """
-    Convert a single ABF electrophysiology session to NWB format.
+    Convert all recordings for a single subject to one NWB file.
 
-    This is the main conversion function that orchestrates the entire workflow:
-    1. Validates the ABF file exists
-    2. Checks corruption status
-    3. Initializes NeuroConv ABF interface
-    4. Creates NWB file with enriched metadata
-    5. Adds corruption annotations if applicable
-    6. Writes the NWB file
+    This function collects all ABF files for a subject (across all cells and protocols),
+    creates a single NWB file with multiple electrodes, and adjusts all timestamps
+    relative to the earliest recording.
 
     Parameters
     ----------
-    abf_file_path : Path or str
-        Path to the ABF file to convert
+    subject_id : str
+        Subject identifier (e.g., "#1", "#2")
+    session_metadata_path : Path or str
+        Path to the session metadata CSV file
+    data_folder_path : Path or str
+        Root folder containing electrophysiology recordings
     output_folder_path : Path or str
-        Path to folder where NWB file will be saved. Directory will be created
-        if it doesn't exist. The output filename will be formatted as
-        "cell_{number:03d}_{abf_stem}.nwb".
-    session_metadata : dict
-        Dictionary containing raw CSV metadata
-    cell_number : int
-        The cell number for this recording session
-    ais_status : Literal["with AIS component", "without AIS component"]
-        Whether the cell has an Axon Initial Segment component
+        Path to folder where NWB file will be saved
 
     Returns
     -------
     Path
         Path to the created NWB file
-
-    Raises
-    ------
-    FileNotFoundError
-        If the ABF file does not exist
-
-    Notes
-    -----
-    - The function applies a workaround for a NeuroConv bug by setting
-      icephys_experiment_type directly in metadata
-    - Corruption annotations use the invalid_times table with custom columns
-      for "reason" and "severity"
     """
-    abf_file_path = Path(abf_file_path)
+    session_metadata_path = Path(session_metadata_path)
+    data_folder_path = Path(data_folder_path)
     output_folder_path = Path(output_folder_path)
 
-    # Validate input file exists
-    if not abf_file_path.exists():
-        raise FileNotFoundError(f"ABF file not found: {abf_file_path}")
+    # Collect all files for this subject
+    all_files = collect_subject_files(
+        subject_id, session_metadata_path, data_folder_path
+    )
 
-    # Process raw CSV metadata
-    # Extract and format the date
-    date_value = session_metadata["date"]
-    if isinstance(date_value, pd.Timestamp):
-        session_start_time = date_value.to_pydatetime()
-    else:
-        session_start_time = pd.to_datetime(date_value).to_pydatetime()
+    if not all_files:
+        raise ValueError(f"No ABF files found for subject {subject_id}")
+
+    # Open all files once to get timing information
+    # Skip files that cannot be parsed (corrupted header)
+    files_with_timing = []
+    corrupted_files = []
+    unparsable_files = []
+
+    for file_info in all_files:
+        file_path = file_info["file_path"]
+        is_corrupted = check_corruption_status(file_path)
+
+        try:
+            neo_reader = AxonRawIO(filename=str(file_path))
+            neo_reader.parse_header()
+            rec_datetime = neo_reader.raw_annotations["blocks"][0]["rec_datetime"]
+
+            files_with_timing.append(
+                {
+                    **file_info,
+                    "rec_datetime": rec_datetime,
+                    "neo_reader": neo_reader,
+                }
+            )
+
+            if is_corrupted:
+                corrupted_files.append((file_path.name, file_info["cell_id"]))
+        except Exception as e:
+            unparsable_files.append((file_path.name, file_info["cell_id"]))
+
+    # Sort files by recording time to ensure chronological processing
+    files_with_timing.sort(key=lambda f: f["rec_datetime"])
+
+    # Find earliest recording time
+    earliest_time = files_with_timing[0]["rec_datetime"]
+    all_files = files_with_timing  # Use the updated list
 
     # Add timezone info (NIH Bethesda, MD is in US Eastern Time)
-    session_start_time = session_start_time.replace(tzinfo=ZoneInfo("America/New_York"))
+    session_start_time = earliest_time.replace(tzinfo=ZoneInfo("America/New_York"))
 
-    # Convert common name to Latin name
+    # Load subject metadata from first cell
+    cells_metadata = get_cells_for_subject(subject_id, session_metadata_path)
+    first_cell = cells_metadata[0]
+
+    # Convert species
     species_mapping = {
         "Rhesus Macaque": "Macaca mulatta",
         "Rhesus macaque": "Macaca mulatta",
     }
     species_latin = species_mapping.get(
-        session_metadata["animal_species"], session_metadata["animal_species"]
+        first_cell["animal_species"], first_cell["animal_species"]
     )
 
     # Convert age from years to days in ISO 8601 format
-    age_iso = f"P{session_metadata['age_years'] * 365:.0f}D"
+    if first_cell["age_years"] is not None:
+        age_iso = f"P{first_cell['age_years'] * 365:.0f}D"
+    else:
+        age_iso = None
 
-    # Extract protocol type from file path
-    protocol_type = abf_file_path.parent.name
-    valid_protocols = ["SF", "CS", "ADP"]
-    if protocol_type not in valid_protocols:
-        raise ValueError(
-            f"Unknown protocol type '{protocol_type}' in path: {abf_file_path}"
-        )
+    # Count unique cells and protocols
+    unique_cells = sorted(set(f["cell_id"] for f in all_files))
+    unique_protocols = sorted(set(f["protocol"] for f in all_files))
+    ais_statuses = sorted(set(f["ais_status"] for f in all_files))
 
-    # Check corruption status
-    is_corrupted = check_corruption_status(abf_file_path)
-
-    # Step 1: Initialize Neo reader
-    neo_reader = AxonRawIO(filename=abf_file_path)
-    neo_reader.parse_header()
-
-    # Step 2: Create base metadata structure
-    metadata = {}
-    metadata["NWBFile"] = {}
-    metadata["Subject"] = {}
-    metadata["Icephys"] = {}
-
-    # Map protocol abbreviations to full names
-    protocol_names = {
-        "SF": "Spontaneous Firing",
-        "CS": "Current Steps",
-        "ADP": "After Depolarization",
-    }
-    protocol_full_name = protocol_names.get(protocol_type, protocol_type)
-
-    # Update NWBFile metadata
-    metadata["NWBFile"]["session_start_time"] = session_start_time
-    metadata["NWBFile"]["session_description"] = (
-        f"Intracellular recording from {session_metadata['neuron_type']} neuron "
-        f"({ais_status}) in {session_metadata['anatomical_region']}"
-    )
-    metadata["NWBFile"]["protocol"] = f"{protocol_full_name} ({protocol_type})"
-    metadata["NWBFile"]["experimenter"] = ["Khaliq, Zayd", "Sansalone, Lorenze"]
-    metadata["NWBFile"]["lab"] = "Cellular Neurophysiology Section"
-    metadata["NWBFile"]["institution"] = (
-        "National Institute of Neurological Disorders and Stroke, National Institutes of Health"
-    )
-    metadata["NWBFile"]["experiment_description"] = (
-        f"Intracellular electrophysiology recording from {session_metadata['neuron_type']} neurons"
-    )
-    metadata["NWBFile"]["keywords"] = [
-        protocol_type,
-        ais_status,
-        session_metadata["neuron_type"],
-        session_metadata["anatomical_region"],
-        "patch-clamp",
-        "intracellular",
-    ]
-
-    # Update Subject metadata
-    metadata["Subject"]["subject_id"] = session_metadata["animal_id"]
-    metadata["Subject"]["species"] = species_latin
-    metadata["Subject"]["sex"] = session_metadata["sex"]
-    metadata["Subject"]["age"] = age_iso
-    metadata["Subject"]["description"] = (
-        f"{session_metadata['neuron_type']} neuron {ais_status}"
-    )
-
-    # Step 3: Create Subject
+    # Create Subject
     subject = Subject(
-        subject_id=metadata["Subject"]["subject_id"],
-        species=metadata["Subject"]["species"],
-        sex=metadata["Subject"]["sex"],
-        age=metadata["Subject"]["age"],
-        description=metadata["Subject"]["description"],
+        subject_id=subject_id,
+        species=species_latin,
+        sex=first_cell["sex"],
+        age=age_iso,
+        description=f"Rhesus macaque subject with intracellular recordings from {first_cell['neuron_type']} neurons in {first_cell['anatomical_region']}",
     )
 
-    # Step 4: Create NWB file directly
+    # Protocol description - same for all subjects
+    protocol_narrative = (
+        "The experimental protocol consisted of three sequential current-clamp recordings "
+        "to characterize intrinsic firing properties of dopaminergic neurons. "
+        "First, spontaneous firing (SF) was recorded to establish baseline intrinsic firing "
+        "patterns without current injection. "
+        "Second, current steps (CS) protocols tested neuronal response to stepwise current "
+        "injection of varying amplitudes. "
+        "Third, after-depolarization (ADP) measurements examined post-stimulus depolarization "
+        "following current injection. "
+        "Recordings were performed on cells both with and without axon initial segment (AIS) "
+        "components to investigate the role of AIS morphology in intrinsic excitability."
+    )
+
     nwbfile = NWBFile(
-        session_description=metadata["NWBFile"]["session_description"],
-        identifier=f"cell_{cell_number:03d}_{abf_file_path.stem}",
-        session_start_time=metadata["NWBFile"]["session_start_time"],
-        experimenter=metadata["NWBFile"]["experimenter"],
-        lab=metadata["NWBFile"]["lab"],
-        institution=metadata["NWBFile"]["institution"],
-        experiment_description=metadata["NWBFile"]["experiment_description"],
-        keywords=metadata["NWBFile"]["keywords"],
-        protocol=metadata["NWBFile"]["protocol"],
+        session_description=(
+            f"Multi-cell intracellular current-clamp recordings from {len(unique_cells)} "
+            f"{first_cell['neuron_type']} neuron(s) in {first_cell['anatomical_region']} "
+            f"of subject {subject_id}"
+        ),
+        identifier=f"subject_{subject_id.replace('#', '')}",
+        session_start_time=session_start_time,
+        experimenter=["Khaliq, Zayd", "Sansalone, Lorenze"],
+        lab="Cellular Neurophysiology Section",
+        institution=(
+            "National Institute of Neurological Disorders and Stroke, National Institutes of Health"
+        ),
+        experiment_description=(
+            f"Intracellular patch-clamp electrophysiology recordings from dopaminergic neurons "
+            f"in the substantia nigra pars compacta to investigate intrinsic firing properties "
+            f"and the role of axon initial segment (AIS) morphology in neuronal excitability. "
+            f"{protocol_narrative}"
+        ),
+        protocol=protocol_narrative,
+        keywords=[
+            first_cell["neuron_type"],
+            "substantia nigra pars compacta",
+            "patch-clamp",
+            "intracellular",
+            "current-clamp",
+            "axon initial segment",
+        ]
+        + unique_protocols
+        + ais_statuses,
         subject=subject,
     )
 
-    # Step 5: Create device and electrode
+    # Step 6: Create device (shared across all electrodes)
     device = nwbfile.create_device(
         name="MultiClamp700B",
         description="Molecular Devices MultiClamp 700B amplifier",
         manufacturer="Molecular Devices",
     )
 
-    electrode_location = f"{session_metadata['anatomical_region']} ({ais_status})"
-    nwbfile.create_icephys_electrode(
-        name="electrode0",
-        description=f"Intracellular electrode for {session_metadata['neuron_type']} neuron recording",
-        device=device,
-        location=electrode_location,
-        cell_id=f"{session_metadata['neuron_type']}_{session_metadata['cell_number']:03d}",
-    )
+    # Create electrodes for each unique cell
+    cell_to_electrode = {}
 
-    # Step 6: Add intracellular data using Neo reader
-    add_icephys_data_from_neo_reader(
-        nwbfile=nwbfile,
-        neo_reader=neo_reader,
-        electrode_name="electrode0",
-    )
+    # Group files by cell to get AIS status for each
+    from collections import defaultdict
 
-    # Step 7: Add corruption annotation ONLY if file is corrupted
-    if is_corrupted:
+    cell_info = defaultdict(set)
+    for f in all_files:
+        cell_info[f["cell_id"]].add(f["ais_status"])
+
+    for cell_id in unique_cells:
+        # Get AIS status for this cell (should be consistent across all files for this cell)
+        ais_status_set = cell_info[cell_id]
+        if len(ais_status_set) > 1:
+            raise ValueError(
+                f"Cell {cell_id} has inconsistent AIS status: {ais_status_set}"
+            )
+        ais_status = list(ais_status_set)[0]
+
+        cell_number = int(cell_id[1:])  # Extract number from "C#"
+        electrode_name = f"IntracellularElectrodeCell{cell_number:02d}"
+
+        # Map to standard brain atlas terminology
+        # Substantia Nigra -> substantia nigra pars compacta (SNc) for dopaminergic neurons
+        location_mapping = {
+            "Substantia Nigra": "substantia nigra pars compacta",
+        }
+        location_standard = location_mapping.get(
+            first_cell["anatomical_region"], first_cell["anatomical_region"].lower()
+        )
+
+        nwbfile.create_icephys_electrode(
+            name=electrode_name,
+            description=(
+                f"Intracellular electrode for {first_cell['neuron_type']} neuron "
+                f"(cell {cell_id}, {ais_status})"
+            ),
+            device=device,
+            location=location_standard,
+            cell_id=f"{first_cell['neuron_type']}Cell{cell_number:02d}",
+        )
+
+        cell_to_electrode[cell_id] = electrode_name
+
+    # Add data from all files
+    # Track sweep counters for each cell to avoid naming conflicts
+    # Track files that fail during data reading
+    cell_sweep_counters = defaultdict(int)
+    data_read_failures = []
+
+    for file_info in all_files:
+        file_path = file_info["file_path"]
+        cell_id = file_info["cell_id"]
+        electrode_name = cell_to_electrode[cell_id]
+
+        # Calculate time offset relative to session start
+        file_rec_time = file_info["rec_datetime"]
+        time_offset = (file_rec_time - earliest_time).total_seconds()
+
+        # Use the already-opened neo_reader
+        neo_reader = file_info["neo_reader"]
+
+        # Get the current sweep counter for this cell
+        sweep_offset = cell_sweep_counters[cell_id]
+
+        # Determine AIS status string for naming
+        ais_string = (
+            "AIS" if file_info["ais_status"] == "with AIS component" else "NOAIS"
+        )
+        protocol = file_info["protocol"]
+
+        try:
+            add_icephys_data_from_neo_reader(
+                nwbfile=nwbfile,
+                neo_reader=neo_reader,
+                electrode_name=electrode_name,
+                time_offset=time_offset,
+                cell_id=cell_id,
+                sweep_offset=sweep_offset,
+                ais_string=ais_string,
+                protocol=protocol,
+            )
+
+            # Update sweep counter for this cell
+            nb_segments = neo_reader.header["nb_segment"][0]
+            cell_sweep_counters[cell_id] += nb_segments
+        except (ValueError, OSError) as e:
+            # File data cannot be read (e.g., mmap errors)
+            data_read_failures.append((file_path.name, cell_id))
+
+    # Add corruption annotations if any corrupted, unparsable, or failed files
+    if corrupted_files or unparsable_files or data_read_failures:
         nwbfile.add_invalid_times_column(
             name="reason",
             description="Type of corruption or artifact detected in the data",
@@ -350,20 +476,37 @@ def convert_session(
             name="severity", description="Severity level of the corruption"
         )
 
-        # Add a placeholder interval indicating the file has corruption
-        # NOTE: Specific time intervals should be determined by detailed analysis
-        nwbfile.add_invalid_time_interval(
-            start_time=0.0,
-            stop_time=0.0,  # Placeholder - actual intervals need to be determined
-            reason="file_marked_as_corrupted",
-            severity="unknown",
-        )
+        # Add a placeholder interval for each corrupted file (timing issues)
+        for file_name, cell_id in corrupted_files:
+            nwbfile.add_invalid_time_interval(
+                start_time=0.0,
+                stop_time=0.0,
+                reason=f"file_marked_as_corrupted: {file_name} (cell {cell_id})",
+                severity="unknown",
+            )
 
-    # Step 8: Write to NWB file
+        # Add entries for unparsable files (corrupted header)
+        for file_name, cell_id in unparsable_files:
+            nwbfile.add_invalid_time_interval(
+                start_time=0.0,
+                stop_time=0.0,
+                reason=f"file_header_corrupted_cannot_parse: {file_name} (cell {cell_id})",
+                severity="critical",
+            )
+
+        # Add entries for files that failed during data reading
+        for file_name, cell_id in data_read_failures:
+            nwbfile.add_invalid_time_interval(
+                start_time=0.0,
+                stop_time=0.0,
+                reason=f"file_data_read_failed: {file_name} (cell {cell_id})",
+                severity="critical",
+            )
+
+    # Write NWB file
     output_folder_path.mkdir(parents=True, exist_ok=True)
 
-    # Generate output filename
-    output_filename = f"cell_{cell_number:03d}_{abf_file_path.stem}.nwb"
+    output_filename = f"subject_{subject_id.replace('#', '')}.nwb"
     nwbfile_path = output_folder_path / output_filename
 
     configure_and_write_nwbfile(
@@ -375,18 +518,22 @@ def convert_session(
 
 def main():
     """
-    Main entry point for ABF to NWB conversion.
+    Main entry point for subject-level ABF to NWB conversion.
 
-    This function sets up default paths for the Khaliq Lab repository structure
-    and converts an example ABF file. Modify the abf_file_path variable to
-    convert different files.
+    This function converts all recordings for a single subject into one NWB file.
+    Select the subject by modifying the SUBJECT_INDEX variable below.
 
-    The function demonstrates typical usage of the convert_session function
-    with the expected directory layout.
+    Available subjects:
+    - Index 0: Subject #1 (5 cells)
+    - Index 1: Subject #2 (29 cells)
+    - Index 2: Subject #3 (2 cells)
+    - Index 3: Subject #4 (3 cells)
+    - Index 4: Subject #5 (1 cell)
+    - Index 5: Subject #6 (1 cell)
     """
 
     # ============================================================================
-    # CONFIGURATION
+    # PATHS
     # ============================================================================
 
     # Base paths
@@ -396,38 +543,18 @@ def main():
     assets_folder_path = Path(__file__).parent / "assets"
 
     # Metadata files
-    session_metadata_path = assets_folder_path / "session_metadata.csv"
+    session_metadata_path = assets_folder_path / "session_metadata_cn_amended.csv"
 
-    # Example ABF file path - UPDATE THIS
-    ais_type = "Cells with AIS component"  # or "Cells without AIS component"
-    folder_date = "10 June 2021"
-    cell = "C1"
-    protocol = "ADP"
-    abf_file_path = (
-        data_folder_path / f"{ais_type}/{folder_date}/{cell}/{protocol}/21610017.abf"
-    )
+    # List of all subjects
+    subject_list = ["#1", "#2", "#3", "#4", "#5", "#6"]
 
-    # Extract cell number and load metadata
-    cell_number = extract_cell_number_from_path(abf_file_path)
-    session_metadata = load_metadata_from_csv(cell_number, session_metadata_path)
-
-    # Extract AIS status from file path
-    path_str = str(abf_file_path)
-    if "with AIS component" in path_str:
-        ais_status = "with AIS component"
-    elif "without AIS component" in path_str:
-        ais_status = "without AIS component"
-    else:
-        raise ValueError(f"Cannot determine AIS status from path: {abf_file_path}")
-
-    # Convert the example file
-    convert_session(
-        abf_file_path=abf_file_path,
-        output_folder_path=output_folder_path,
-        session_metadata=session_metadata,
-        cell_number=cell_number,
-        ais_status=ais_status,
-    )
+    for selected_subject in tqdm(subject_list, desc="Converting subjects"):
+        convert_subject(
+            subject_id=selected_subject,
+            session_metadata_path=session_metadata_path,
+            data_folder_path=data_folder_path,
+            output_folder_path=output_folder_path,
+        )
 
 
 if __name__ == "__main__":

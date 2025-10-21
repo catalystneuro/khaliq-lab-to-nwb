@@ -4,9 +4,11 @@ Analyze session start times for all ABF files to determine temporal grouping.
 This script scans all ABF files in the data directory and extracts:
 - AIS component status (with/without AIS)
 - Recording date folder
+- Cell folder
 - Protocol type (SF, CS, ADP)
 - File path
 - Session start time
+- Subject ID (from metadata CSV)
 
 The output is saved as a CSV file for analysis of whether files from the same
 date should be grouped into a single experimental session or kept separate.
@@ -58,7 +60,35 @@ def extract_cell_folder(file_path: Path) -> str:
     return "unknown"
 
 
-def analyze_all_sessions(data_folder: Path, output_csv: Path) -> None:
+def load_subject_mapping(metadata_csv: Path) -> dict:
+    """
+    Load mapping from cell number to subject ID from metadata CSV.
+
+    Parameters
+    ----------
+    metadata_csv : Path
+        Path to session_metadata.csv file.
+
+    Returns
+    -------
+    dict
+        Dictionary mapping cell number (int) to subject ID (str).
+    """
+    cell_to_subject = {}
+
+    with open(metadata_csv, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            cell_num = int(row["Cell #"])
+            subject_id = row["Animal ID"]
+            cell_to_subject[cell_num] = subject_id
+
+    return cell_to_subject
+
+
+def analyze_all_sessions(
+    data_folder: Path, output_csv: Path, metadata_csv: Path
+) -> None:
     """
     Analyze all ABF files and save timing information to CSV.
 
@@ -68,7 +98,13 @@ def analyze_all_sessions(data_folder: Path, output_csv: Path) -> None:
         Root folder containing electrophysiology recordings.
     output_csv : Path
         Path where the output CSV file will be saved.
+    metadata_csv : Path
+        Path to session_metadata.csv file for subject mapping.
     """
+    # Load subject mapping from metadata CSV
+    cell_to_subject = load_subject_mapping(metadata_csv)
+    print(f"Loaded subject mapping for {len(cell_to_subject)} cells")
+
     # Find all ABF files
     abf_files = sorted(data_folder.glob("**/*.abf"))
 
@@ -88,6 +124,13 @@ def analyze_all_sessions(data_folder: Path, output_csv: Path) -> None:
             cell_folder = extract_cell_folder(abf_file)
             protocol = abf_file.parent.name
 
+            # Extract cell number from cell_folder (e.g., "C1" -> 1)
+            cell_number = None
+            subject_id = "unknown"
+            if cell_folder.startswith("C") and cell_folder[1:].isdigit():
+                cell_number = int(cell_folder[1:])
+                subject_id = cell_to_subject.get(cell_number, "unknown")
+
             # Read session start time from ABF file
             reader = AxonRawIO(filename=str(abf_file))
             reader.parse_header()
@@ -102,6 +145,7 @@ def analyze_all_sessions(data_folder: Path, output_csv: Path) -> None:
                     "ais_status": ais_status,
                     "date_folder": date_folder,
                     "cell_folder": cell_folder,
+                    "subject_id": subject_id,
                     "protocol": protocol,
                     "file_name": abf_file.name,
                     "session_start_time": session_start_time_str,
@@ -112,11 +156,12 @@ def analyze_all_sessions(data_folder: Path, output_csv: Path) -> None:
             print(f"Error processing {abf_file}: {e}")
             continue
 
-    # Sort by AIS status, date, cell, and session start time
+    # Sort by AIS status, date, subject, cell, and session start time
     rows.sort(
         key=lambda x: (
             x["ais_status"],
             x["date_folder"],
+            x["subject_id"],
             x["cell_folder"],
             x["session_start_time"],
         )
@@ -130,6 +175,7 @@ def analyze_all_sessions(data_folder: Path, output_csv: Path) -> None:
             "ais_status",
             "date_folder",
             "cell_folder",
+            "subject_id",
             "protocol",
             "file_name",
             "session_start_time",
@@ -148,13 +194,18 @@ def main():
     # Define paths
     repo_root = Path(__file__).parent.parent.parent.parent.parent
     data_folder = repo_root / "data" / "Electrophysiology recordings"
+    metadata_csv = Path(__file__).parent / "session_metadata_cn_amended.csv"
     output_csv = Path(__file__).parent / "session_timing_analysis.csv"
 
     if not data_folder.exists():
         print(f"Error: Data folder not found at {data_folder}")
         return
 
-    analyze_all_sessions(data_folder, output_csv)
+    if not metadata_csv.exists():
+        print(f"Error: Metadata CSV not found at {metadata_csv}")
+        return
+
+    analyze_all_sessions(data_folder, output_csv, metadata_csv)
 
 
 if __name__ == "__main__":

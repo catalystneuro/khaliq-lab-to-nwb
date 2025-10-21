@@ -1,3 +1,5 @@
+from typing import Literal
+
 from neo.rawio import AxonRawIO
 from pynwb import NWBFile
 from pynwb.icephys import CurrentClampSeries, CurrentClampStimulusSeries
@@ -7,6 +9,11 @@ def add_icephys_data_from_neo_reader(
     nwbfile: NWBFile,
     neo_reader: AxonRawIO,
     electrode_name: str = "electrode0",
+    time_offset: float = 0.0,
+    cell_id: str = "",
+    sweep_offset: int = 0,
+    ais_string: Literal["AIS", "NOAIS"] = "AIS",
+    protocol: Literal["SF", "CS", "ADP"] = "SF",
 ) -> NWBFile:
     """
     Add intracellular current-clamp electrophysiology data from a Neo AxonRawIO reader to an NWBFile.
@@ -27,6 +34,21 @@ def add_icephys_data_from_neo_reader(
     electrode_name : str, default: "electrode0"
         Name of the electrode in the NWBFile to associate with these recordings.
         This electrode must already exist in nwbfile.icephys_electrodes.
+    time_offset : float, default: 0.0
+        Time offset in seconds to add to all timestamps. Used when combining multiple
+        recordings into a single NWB file to adjust timestamps relative to a common
+        reference time (typically the earliest recording in the session).
+    cell_id : str, default: ""
+        Cell identifier to include in sweep names. Used when multiple cells are
+        recorded in the same NWB file to distinguish sweeps from different cells.
+    sweep_offset : int, default: 0
+        Offset to add to sweep numbers. Used when multiple files for the same cell
+        are combined to avoid naming conflicts. Each file's sweeps will be numbered
+        starting from this offset.
+    ais_string : str, default: ""
+        AIS status string ("AIS" or "NOAIS") for naming series.
+    protocol : str, default: ""
+        Protocol abbreviation (SF, CS, ADP) for naming series.
 
     Returns
     -------
@@ -125,22 +147,34 @@ def add_icephys_data_from_neo_reader(
                 current_data = current_data / 1e9
 
         # Create unique names for this sweep
-        sweep_number = segment_index
-        response_name = f"CurrentClampSeries_{sweep_number:03d}"
+        # Apply sweep offset to avoid conflicts when combining multiple files
+        sweep_number = segment_index + sweep_offset
+
+        # Extract cell number from cell_id (e.g., "C14" -> "14")
+        cell_number_str = cell_id[1:] if cell_id else "00"
+
+        # Format: CurrentClampSeriesAisProtocolSfCell01Sweep022
+        # Components: {Ais|Noais}Protocol{XX}Cell{XX}Sweep{XXX}
+        ais_part = "Ais" if ais_string == "AIS" else "Noais"
+        response_name = f"CurrentClampSeries{ais_part}Protocol{protocol}Cell{cell_number_str:0>2}Sweep{sweep_number:03d}"
+
+        # Adjust timestamp relative to reference time
+        adjusted_t_start = t_start + time_offset
 
         # Add stimulus if current channel is present
         if has_current_channel:
-            stimulus_name = f"CurrentClampStimulusSeries_{sweep_number:03d}"
+            stimulus_name = f"CurrentClampStimulusSeries{ais_part}Protocol{protocol}Cell{cell_number_str:0>2}Sweep{sweep_number:03d}"
 
             stimulus_series = CurrentClampStimulusSeries(
                 name=stimulus_name,
                 data=current_data,
-                starting_time=t_start,
+                starting_time=adjusted_t_start,
                 rate=sampling_rate,
                 electrode=electrode,
                 gain=1.0,
                 unit="amperes",
-                description=f"Current stimulus for sweep {sweep_number}",
+                description=f"Current stimulus for sweep {sweep_number}"
+                + (f" (cell {cell_id})" if cell_id else ""),
             )
             nwbfile.add_stimulus(stimulus_series)
         else:
@@ -151,13 +185,14 @@ def add_icephys_data_from_neo_reader(
         response_series = CurrentClampSeries(
             name=response_name,
             data=voltage_data,
-            starting_time=t_start,
+            starting_time=adjusted_t_start,
             rate=sampling_rate,
             electrode=electrode,
             gain=1.0,
             unit="volts",
             stimulus_description=stimulus_series.name if stimulus_series else "none",
-            description=f"Voltage response for sweep {sweep_number}",
+            description=f"Voltage response for sweep {sweep_number}"
+            + (f" (cell {cell_id})" if cell_id else ""),
         )
         nwbfile.add_acquisition(response_series)
 
