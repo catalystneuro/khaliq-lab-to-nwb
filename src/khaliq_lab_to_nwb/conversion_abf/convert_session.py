@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -11,52 +12,34 @@ def load_metadata_from_csv(
     session_metadata_path: Path,
 ) -> dict:
     """
-    Load metadata for a specific cell from the session metadata CSV file.
+    Load raw metadata for a specific cell from the session metadata CSV file.
 
-    This function reads the session metadata CSV file containing experimental metadata
-    for all cells, locates the row corresponding to the specified cell number, and
-    extracts relevant information to populate NWB metadata fields.
+    This function finds and returns the matching row from the CSV as raw, unprocessed data.
 
     Parameters
     ----------
     cell_number : int
-        The cell number to look up in the session metadata (e.g., 1, 2, 3...).
-        This corresponds to the "Cell #" column in the CSV file.
+        The cell number to look up (corresponds to "Cell #" column in CSV).
     session_metadata_path : Path
-        Path to the session metadata CSV file containing columns:
-        - "Cell #": Cell identifier
-        - "Date": Recording date
-        - "Neuron Type": Type of neuron (e.g., "Dopaminergic")
-        - "Anatomical Region": Brain region (e.g., "Substantia Nigra")
-        - "Animal ID": Subject identifier
-        - "Animal Species": Species name (e.g., "Rhesus Macaque")
-        - "Sex": Subject sex ("M" or "F")
-        - "Animal Age (Years)": Subject age in years
+        Path to the session metadata CSV file.
 
     Returns
     -------
     dict
-        Dictionary containing NWB-formatted metadata with keys:
-        - "session_start_time": datetime with timezone
-        - "session_description": str
-        - "experimenter": list[str]
-        - "lab": str
-        - "institution": str
-        - "experiment_description": str
-        - "subject": dict with subject_id, species, sex, age
+        Dictionary containing raw CSV data:
+        - "date": Recording date (str or datetime)
+        - "cell_number": Cell identifier (int)
+        - "neuron_type": Type of neuron (str)
+        - "anatomical_region": Brain region (str)
+        - "animal_id": Subject identifier (str)
+        - "animal_species": Species name (str)
+        - "sex": Subject sex (str)
+        - "age_years": Subject age in years (float)
 
     Raises
     ------
     ValueError
-        If the specified cell number is not found in the session metadata
-    FileNotFoundError
-        If the session metadata CSV file does not exist
-
-    Notes
-    -----
-    - All timestamps are converted to US Central Time (America/Chicago)
-    - Species names are mapped from common names to Latin nomenclature
-    - Age is converted from years to ISO 8601 duration format (e.g., "P3577D")
+        If the specified cell number is not found in the session metadata.
     """
     df = pd.read_csv(session_metadata_path)
 
@@ -68,44 +51,17 @@ def load_metadata_from_csv(
 
     cell_data = cell_row.iloc[0]
 
-    # Extract and format the date
-    date_value = cell_data["Date"]
-    if isinstance(date_value, pd.Timestamp):
-        session_start_time = date_value.to_pydatetime()
-    else:
-        session_start_time = pd.to_datetime(date_value).to_pydatetime()
-
-    # Add timezone info (NIH Bethesda, MD is in US Eastern Time)
-    session_start_time = session_start_time.replace(tzinfo=ZoneInfo("America/New_York"))
-
-    # Convert common name to Latin name
-    species_mapping = {
-        "Rhesus Macaque": "Macaca mulatta",
-        "Rhesus macaque": "Macaca mulatta",
-    }
-    species_latin = species_mapping.get(
-        cell_data["Animal Species"], cell_data["Animal Species"]
-    )
-
-    # Build metadata dictionary
-    metadata = {
-        "session_start_time": session_start_time,
-        "cell_number": int(cell_data["Cell #"]),  # Get cell number from CSV
+    # Return raw CSV data
+    return {
+        "date": cell_data["Date"],
+        "cell_number": int(cell_data["Cell #"]),
         "neuron_type": cell_data["Neuron Type"],
         "anatomical_region": cell_data["Anatomical Region"],
-        "experimenter": ["Khaliq, Zayd", "Sansalone, Lorenze"],
-        "lab": "Cellular Neurophysiology Section",
-        "institution": "National Institute of Neurological Disorders and Stroke, National Institutes of Health",
-        "experiment_description": f"Intracellular electrophysiology recording from {cell_data['Neuron Type']} neurons",
-        "subject": {
-            "subject_id": cell_data["Animal ID"],
-            "species": species_latin,
-            "sex": cell_data["Sex"],
-            "age": f"P{float(cell_data['Animal Age (Years)']) * 365:.0f}D",  # Convert years to days
-        },
+        "animal_id": cell_data["Animal ID"],
+        "animal_species": cell_data["Animal Species"],
+        "sex": cell_data["Sex"],
+        "age_years": float(cell_data["Animal Age (Years)"]),
     }
-
-    return metadata
 
 
 def check_corruption_status(file_path: Path) -> bool:
@@ -185,70 +141,6 @@ def extract_cell_number_from_path(file_path: Path) -> int:
     raise ValueError(f"Could not extract cell number from path: {file_path}")
 
 
-def extract_protocol_type(file_path: Path) -> str:
-    """
-    Extract the protocol type from the ABF file path.
-
-    The Khaliq Lab data organizes recordings by protocol type in directories
-    named SF (Spontaneous Firing), CS (Current Steps), or ADP (After Depolarization).
-
-    Parameters
-    ----------
-    file_path : Path
-        Path to the ABF file, expected to have a parent directory with protocol name
-
-    Returns
-    -------
-    str
-        The protocol type abbreviation (SF, CS, or ADP)
-
-    Raises
-    ------
-    ValueError
-        If the parent directory doesn't match known protocol types
-    """
-    protocol = file_path.parent.name
-    valid_protocols = ["SF", "CS", "ADP"]
-
-    if protocol in valid_protocols:
-        return protocol
-
-    raise ValueError(f"Unknown protocol type '{protocol}' in path: {file_path}")
-
-
-def extract_ais_status(file_path: Path) -> str:
-    """
-    Extract whether the cell has an AIS (Axon Initial Segment) component.
-
-    The Khaliq Lab data is organized into two main categories based on whether
-    cells have an AIS component, indicated by the top-level directory structure.
-
-    Parameters
-    ----------
-    file_path : Path
-        Path to the ABF file
-
-    Returns
-    -------
-    str
-        Either "with AIS component" or "without AIS component"
-
-    Notes
-    -----
-    AIS (Axon Initial Segment) is the specific branching of the soma that
-    turns into an axon - this is an important cell feature for classification.
-    """
-    path_str = str(file_path)
-
-    if "with AIS component" in path_str:
-        return "with AIS component"
-    elif "without AIS component" in path_str:
-        return "without AIS component"
-    else:
-        # Default to unknown if structure is different
-        return "AIS status unknown"
-
-
 # ============================================================================
 # MAIN CONVERSION WORKFLOW
 # ============================================================================
@@ -259,6 +151,7 @@ def convert_session(
     output_folder_path: Path | str,
     session_metadata: dict,
     cell_number: int,
+    ais_status: Literal["with AIS component", "without AIS component"],
 ) -> Path:
     """
     Convert a single ABF electrophysiology session to NWB format.
@@ -280,16 +173,11 @@ def convert_session(
         if it doesn't exist. The output filename will be formatted as
         "cell_{number:03d}_{abf_stem}.nwb".
     session_metadata : dict
-        Dictionary containing NWB-formatted metadata with keys:
-        - "session_start_time": datetime with timezone
-        - "session_description": str
-        - "experimenter": list[str]
-        - "lab": str
-        - "institution": str
-        - "experiment_description": str
-        - "subject": dict with subject_id, species, sex, age
+        Dictionary containing raw CSV metadata
     cell_number : int
         The cell number for this recording session
+    ais_status : Literal["with AIS component", "without AIS component"]
+        Whether the cell has an Axon Initial Segment component
 
     Returns
     -------
@@ -315,9 +203,36 @@ def convert_session(
     if not abf_file_path.exists():
         raise FileNotFoundError(f"ABF file not found: {abf_file_path}")
 
-    # Extract additional metadata from file path
-    protocol_type = extract_protocol_type(abf_file_path)
-    ais_status = extract_ais_status(abf_file_path)
+    # Process raw CSV metadata
+    # Extract and format the date
+    date_value = session_metadata["date"]
+    if isinstance(date_value, pd.Timestamp):
+        session_start_time = date_value.to_pydatetime()
+    else:
+        session_start_time = pd.to_datetime(date_value).to_pydatetime()
+
+    # Add timezone info (NIH Bethesda, MD is in US Eastern Time)
+    session_start_time = session_start_time.replace(tzinfo=ZoneInfo("America/New_York"))
+
+    # Convert common name to Latin name
+    species_mapping = {
+        "Rhesus Macaque": "Macaca mulatta",
+        "Rhesus macaque": "Macaca mulatta",
+    }
+    species_latin = species_mapping.get(
+        session_metadata["animal_species"], session_metadata["animal_species"]
+    )
+
+    # Convert age from years to days in ISO 8601 format
+    age_iso = f"P{session_metadata['age_years'] * 365:.0f}D"
+
+    # Extract protocol type from file path
+    protocol_type = abf_file_path.parent.name
+    valid_protocols = ["SF", "CS", "ADP"]
+    if protocol_type not in valid_protocols:
+        raise ValueError(
+            f"Unknown protocol type '{protocol_type}' in path: {abf_file_path}"
+        )
 
     # Check corruption status
     is_corrupted = check_corruption_status(abf_file_path)
@@ -337,18 +252,20 @@ def convert_session(
     protocol_full_name = protocol_names.get(protocol_type, protocol_type)
 
     # Update NWBFile metadata
-    metadata["NWBFile"]["session_start_time"] = session_metadata["session_start_time"]
+    metadata["NWBFile"]["session_start_time"] = session_start_time
     metadata["NWBFile"]["session_description"] = (
         f"Intracellular recording from {session_metadata['neuron_type']} neuron "
         f"({ais_status}) in {session_metadata['anatomical_region']}"
     )
     metadata["NWBFile"]["protocol"] = f"{protocol_full_name} ({protocol_type})"
-    metadata["NWBFile"]["experimenter"] = session_metadata["experimenter"]
-    metadata["NWBFile"]["lab"] = session_metadata["lab"]
-    metadata["NWBFile"]["institution"] = session_metadata["institution"]
-    metadata["NWBFile"]["experiment_description"] = session_metadata[
-        "experiment_description"
-    ]
+    metadata["NWBFile"]["experimenter"] = ["Khaliq, Zayd", "Sansalone, Lorenze"]
+    metadata["NWBFile"]["lab"] = "Cellular Neurophysiology Section"
+    metadata["NWBFile"]["institution"] = (
+        "National Institute of Neurological Disorders and Stroke, National Institutes of Health"
+    )
+    metadata["NWBFile"]["experiment_description"] = (
+        f"Intracellular electrophysiology recording from {session_metadata['neuron_type']} neurons"
+    )
     metadata["NWBFile"]["keywords"] = [
         protocol_type,
         ais_status,
@@ -359,7 +276,10 @@ def convert_session(
     ]
 
     # Update Subject metadata
-    metadata["Subject"].update(session_metadata["subject"])
+    metadata["Subject"]["subject_id"] = session_metadata["animal_id"]
+    metadata["Subject"]["species"] = species_latin
+    metadata["Subject"]["sex"] = session_metadata["sex"]
+    metadata["Subject"]["age"] = age_iso
     metadata["Subject"]["description"] = (
         f"{session_metadata['neuron_type']} neuron {ais_status}"
     )
@@ -438,7 +358,7 @@ def main():
 
     # Base paths
     repo_root_path = Path(__file__).parent.parent.parent.parent
-    data_folder_path = repo_root_path / "data"
+    data_folder_path = repo_root_path / "data" / "Electrophysiology recordings"
     output_folder_path = repo_root_path / "nwbfiles"
     assets_folder_path = Path(__file__).parent / "assets"
 
@@ -446,14 +366,26 @@ def main():
     session_metadata_path = assets_folder_path / "session_metadata.csv"
 
     # Example ABF file path - UPDATE THIS
+    ais_type = "with AIS component"  # or "without AIS component"
+    folder_date = "10 June 2021"
+    cell = "C1"
+    protocol = "ADP"
     abf_file_path = (
-        data_folder_path
-        / "Electrophysiology recordings/Cells with AIS component/10 June 2021/C1/ADP/21610017.abf"
+        data_folder_path / f"{ais_type}/{folder_date}/{cell}/{protocol}/21610017.abf"
     )
 
     # Extract cell number and load metadata
     cell_number = extract_cell_number_from_path(abf_file_path)
     session_metadata = load_metadata_from_csv(cell_number, session_metadata_path)
+
+    # Extract AIS status from file path
+    path_str = str(abf_file_path)
+    if "with AIS component" in path_str:
+        ais_status = "with AIS component"
+    elif "without AIS component" in path_str:
+        ais_status = "without AIS component"
+    else:
+        raise ValueError(f"Cannot determine AIS status from path: {abf_file_path}")
 
     # Convert the example file
     convert_session(
@@ -461,6 +393,7 @@ def main():
         output_folder_path=output_folder_path,
         session_metadata=session_metadata,
         cell_number=cell_number,
+        ais_status=ais_status,
     )
 
 
