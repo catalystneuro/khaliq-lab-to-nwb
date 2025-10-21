@@ -52,8 +52,8 @@ def add_icephys_data_from_neo_reader(
 
     Returns
     -------
-    NWBFile
-        The NWBFile with intracellular data added.
+    list[int]
+        List of intracellular recording indices (one per sweep added).
 
     Raises
     ------
@@ -104,6 +104,7 @@ def add_icephys_data_from_neo_reader(
 
     # Process each sweep (segment)
     nb_segments = neo_reader.header["nb_segment"][0]
+    recording_indices = []
 
     for segment_index in range(nb_segments):
         # Get timing information
@@ -197,10 +198,11 @@ def add_icephys_data_from_neo_reader(
         nwbfile.add_acquisition(response_series)
 
         # Add intracellular recording to link stimulus and response
-        nwbfile.add_intracellular_recording(
+        ir_index = nwbfile.add_intracellular_recording(
             electrode=electrode,
             stimulus=stimulus_series,
             response=response_series,
         )
+        recording_indices.append(ir_index)
 
-    return nwbfile
+    return recording_indices

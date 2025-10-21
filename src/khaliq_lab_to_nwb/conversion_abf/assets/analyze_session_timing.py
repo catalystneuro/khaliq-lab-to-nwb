@@ -87,7 +87,9 @@ def load_subject_mapping(metadata_csv: Path) -> dict:
 
 
 def analyze_all_sessions(
-    data_folder: Path, output_csv: Path, metadata_csv: Path
+    data_folder: Path,
+    output_csv: Path,
+    metadata_csv: Path,
 ) -> None:
     """
     Analyze all ABF files and save timing information to CSV.
