@@ -12,6 +12,9 @@ from tqdm import tqdm
 from khaliq_lab_to_nwb.conversion_abf.icephys_neo_interface import (
     add_icephys_data_from_neo_reader,
 )
+from khaliq_lab_to_nwb.conversion_abf.saturation_annotation import (
+    add_saturation_annotations,
+)
 
 
 def check_corruption_status(file_path: Path) -> bool:
@@ -290,7 +293,7 @@ def collect_subject_files(
         - "cell_id": Cell ID string (e.g., "C1")
         - "ais_status": "with AIS component" or "without AIS component"
         - "protocol": Protocol type (SF, CS, ADP)
-        - "rec_datetime": Recording datetime from ABF file
+        - "date_folder": Date folder name (e.g., "10 Jun 2021")
     """
     # Get all cells for this subject
     cells = get_cells_for_subject(subject_id, session_metadata_path)
@@ -325,6 +328,10 @@ def collect_subject_files(
             # Get protocol from parent directory
             protocol = abf_file.parent.name
 
+            # Extract date folder (grandparent of protocol folder)
+            # Path structure: .../<ais_status>/<date_folder>/<cell_folder>/<protocol>/<file.abf>
+            date_folder = abf_file.parent.parent.parent.name
+
             all_files.append(
                 {
                     "file_path": abf_file,
@@ -332,6 +339,7 @@ def collect_subject_files(
                     "cell_id": f"C{cell_number}",
                     "ais_status": ais_status,
                     "protocol": protocol,
+                    "date_folder": date_folder,
                 }
             )
 
@@ -343,16 +351,17 @@ def collect_subject_files(
 # ============================================================================
 
 
-def convert_subject(
+def convert_session(
     subject_id: str,
+    recording_date: str,
     session_metadata_path: Path | str,
     data_folder_path: Path | str,
     output_folder_path: Path | str,
 ) -> Path:
     """
-    Convert all recordings for a single subject to one NWB file.
+    Convert all recordings for a single session (subject + date) to one NWB file.
 
-    This function collects all ABF files for a subject (across all cells and protocols),
+    This function collects all ABF files for a specific subject recorded on a specific date,
     creates a single NWB file with multiple electrodes, and adjusts all timestamps
     relative to the earliest recording.
 
@@ -360,6 +369,8 @@ def convert_subject(
     ----------
     subject_id : str
         Subject identifier (e.g., "#1", "#2")
+    recording_date : str
+        Recording date folder name (e.g., "10 Jun 2021", "27 Sep 2021")
     session_metadata_path : Path or str
         Path to the session metadata CSV file
     data_folder_path : Path or str
@@ -377,22 +388,24 @@ def convert_subject(
     output_folder_path = Path(output_folder_path)
 
     # Collect all files for this subject
-    all_files = collect_subject_files(
+    all_subject_files = collect_subject_files(
         subject_id, session_metadata_path, data_folder_path
     )
 
+    # Filter files for this specific recording date
+    all_files = [f for f in all_subject_files if f["date_folder"] == recording_date]
+
     if not all_files:
-        raise ValueError(f"No ABF files found for subject {subject_id}")
+        raise ValueError(
+            f"No ABF files found for subject {subject_id} on date {recording_date}"
+        )
 
     # Open all files once to get timing information
     # Skip files that cannot be parsed (corrupted header)
     files_with_timing = []
-    corrupted_files = []
-    unparsable_files = []
 
     for file_info in all_files:
         file_path = file_info["file_path"]
-        is_corrupted = check_corruption_status(file_path)
 
         try:
             neo_reader = AxonRawIO(filename=str(file_path))
@@ -406,11 +419,9 @@ def convert_subject(
                     "neo_reader": neo_reader,
                 }
             )
-
-            if is_corrupted:
-                corrupted_files.append((file_path.name, file_info["cell_id"]))
         except Exception as e:
-            unparsable_files.append((file_path.name, file_info["cell_id"]))
+            # Skip files that cannot be parsed - they won't be in the NWB file
+            print(f"Warning: Skipping {file_path.name} - unable to parse header: {e}")
 
     # Sort files by recording time to ensure chronological processing
     files_with_timing.sort(key=lambda f: f["rec_datetime"])
@@ -469,13 +480,18 @@ def convert_subject(
         "components to investigate the role of AIS morphology in intrinsic excitability."
     )
 
+    # Create session identifier with date
+    # Format date as YYYY-MM-DD for identifier
+
+    date_for_id = session_start_time.strftime("%Y%m%d")
+
     nwbfile = NWBFile(
         session_description=(
             f"Multi-cell intracellular current-clamp recordings from {len(unique_cells)} "
             f"{first_cell['neuron_type']} neuron(s) in {first_cell['anatomical_region']} "
-            f"of subject {subject_id}"
+            f"of subject {subject_id} on {recording_date}"
         ),
-        identifier=f"subject_{subject_id.replace('#', '')}",
+        identifier=f"subject_{subject_id.replace('#', '')}_{date_for_id}",
         session_start_time=session_start_time,
         experimenter=["Khaliq, Zayd", "Sansalone, Lorenze"],
         lab="Cellular Neurophysiology Section",
@@ -555,10 +571,8 @@ def convert_subject(
 
     # Add data from all files
     # Track sweep counters for each cell to avoid naming conflicts
-    # Track files that fail during data reading
     # Collect recording indices for building icephys tables
     cell_sweep_counters = defaultdict(int)
-    data_read_failures = []
     files_with_recordings = []
 
     for file_info in all_files:
@@ -608,46 +622,15 @@ def convert_subject(
                     "recording_indices": recording_indices,
                 }
             )
-        except (ValueError, OSError):
-            # File data cannot be read (e.g., mmap errors)
-            data_read_failures.append((file_path.name, cell_id))
+        except (ValueError, OSError) as e:
+            # File data cannot be read (e.g., mmap errors) - skip it
+            print(f"Warning: Skipping data from {file_path.name} - read error: {e}")
 
-    # Add corruption annotations if any corrupted, unparsable, or failed files
-    if corrupted_files or unparsable_files or data_read_failures:
-        nwbfile.add_invalid_times_column(
-            name="reason",
-            description="Type of corruption or artifact detected in the data",
-        )
-        nwbfile.add_invalid_times_column(
-            name="severity", description="Severity level of the corruption"
-        )
-
-        # Add a placeholder interval for each corrupted file (timing issues)
-        for file_name, cell_id in corrupted_files:
-            nwbfile.add_invalid_time_interval(
-                start_time=0.0,
-                stop_time=0.0,
-                reason=f"file_marked_as_corrupted: {file_name} (cell {cell_id})",
-                severity="unknown",
-            )
-
-        # Add entries for unparsable files (corrupted header)
-        for file_name, cell_id in unparsable_files:
-            nwbfile.add_invalid_time_interval(
-                start_time=0.0,
-                stop_time=0.0,
-                reason=f"file_header_corrupted_cannot_parse: {file_name} (cell {cell_id})",
-                severity="critical",
-            )
-
-        # Add entries for files that failed during data reading
-        for file_name, cell_id in data_read_failures:
-            nwbfile.add_invalid_time_interval(
-                start_time=0.0,
-                stop_time=0.0,
-                reason=f"file_data_read_failed: {file_name} (cell {cell_id})",
-                severity="critical",
-            )
+    # Detect and annotate voltage saturation in all acquisition time series
+    add_saturation_annotations(
+        nwbfile=nwbfile,
+        voltage_threshold=0.2,  # 200 mV absolute voltage threshold
+    )
 
     # Build icephys hierarchical tables
     if files_with_recordings:
@@ -656,7 +639,7 @@ def convert_subject(
     # Write NWB file
     output_folder_path.mkdir(parents=True, exist_ok=True)
 
-    output_filename = f"subject_{subject_id.replace('#', '')}.nwb"
+    output_filename = f"subject_{subject_id.replace('#', '')}_{date_for_id}.nwb"
     nwbfile_path = output_folder_path / output_filename
 
     configure_and_write_nwbfile(
@@ -668,18 +651,19 @@ def convert_subject(
 
 def main():
     """
-    Main entry point for subject-level ABF to NWB conversion.
+    Main entry point for session-level ABF to NWB conversion.
 
-    This function converts all recordings for a single subject into one NWB file.
-    Select the subject by modifying the SUBJECT_INDEX variable below.
+    This function converts all recordings for each session (subject + date combination)
+    into separate NWB files. This ensures that only recordings from the same day
+    are aggregated together.
 
     Available subjects:
-    - Index 0: Subject #1 (5 cells)
-    - Index 1: Subject #2 (29 cells)
-    - Index 2: Subject #3 (2 cells)
-    - Index 3: Subject #4 (3 cells)
-    - Index 4: Subject #5 (1 cell)
-    - Index 5: Subject #6 (1 cell)
+    - Subject #1 (5 cells across multiple dates)
+    - Subject #2 (29 cells across multiple dates)
+    - Subject #3 (2 cells)
+    - Subject #4 (3 cells)
+    - Subject #5 (1 cell)
+    - Subject #6 (1 cell)
     """
 
     # ============================================================================
@@ -698,9 +682,26 @@ def main():
     # List of all subjects
     subject_list = ["#1", "#2", "#3", "#4", "#5", "#6"]
 
-    for selected_subject in tqdm(subject_list, desc="Converting subjects"):
-        convert_subject(
-            subject_id=selected_subject,
+    # Collect all subject-date combinations
+    session_combinations = []
+    for subject_id in subject_list:
+        all_files = collect_subject_files(
+            subject_id, session_metadata_path, data_folder_path
+        )
+        # Get unique dates for this subject
+        unique_dates = sorted(set(f["date_folder"] for f in all_files))
+        for date_folder in unique_dates:
+            session_combinations.append((subject_id, date_folder))
+
+    print(f"Found {len(session_combinations)} sessions to convert")
+
+    # Convert each session
+    for subject_id, recording_date in tqdm(
+        session_combinations, desc="Converting sessions"
+    ):
+        convert_session(
+            subject_id=subject_id,
+            recording_date=recording_date,
             session_metadata_path=session_metadata_path,
             data_folder_path=data_folder_path,
             output_folder_path=output_folder_path,
