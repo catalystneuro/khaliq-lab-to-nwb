@@ -12,6 +12,7 @@ from tqdm import tqdm
 from khaliq_lab_to_nwb.conversion_abf.icephys_neo_interface import (
     add_icephys_data_from_neo_reader,
 )
+from khaliq_lab_to_nwb.conversion_abf.protocol_epochs import add_protocol_epochs
 from khaliq_lab_to_nwb.conversion_abf.saturation_annotation import (
     add_saturation_annotations,
 )
@@ -612,7 +613,21 @@ def convert_session(
             nb_segments = neo_reader.header["nb_segment"][0]
             cell_sweep_counters[cell_id] += nb_segments
 
-            # Store file info with recording indices for building icephys tables
+            # Calculate timing for this protocol recording
+            # Get the first and last sweep times from the neo reader
+            first_sweep_start = neo_reader._segment_t_start(block_index=0, seg_index=0)
+            last_sweep_start = neo_reader._segment_t_start(
+                block_index=0, seg_index=nb_segments - 1
+            )
+            last_sweep_duration = neo_reader._segment_t_stop(
+                block_index=0, seg_index=nb_segments - 1
+            )
+
+            # Absolute times including time offset
+            epoch_start_time = first_sweep_start + time_offset
+            epoch_stop_time = last_sweep_duration + time_offset
+
+            # Store file info with recording indices for building icephys tables and epochs
             files_with_recordings.append(
                 {
                     "cell_id": cell_id,
@@ -620,6 +635,8 @@ def convert_session(
                     "ais_status": file_info["ais_status"],
                     "electrode_name": electrode_name,
                     "recording_indices": recording_indices,
+                    "start_time": epoch_start_time,
+                    "stop_time": epoch_stop_time,
                 }
             )
         except (ValueError, OSError) as e:
@@ -635,6 +652,10 @@ def convert_session(
     # Build icephys hierarchical tables
     if files_with_recordings:
         build_icephys_tables(nwbfile, files_with_recordings)
+
+    # Add protocol-based epochs for temporal organization
+    if files_with_recordings:
+        add_protocol_epochs(nwbfile, files_with_recordings)
 
     # Write NWB file
     output_folder_path.mkdir(parents=True, exist_ok=True)
