@@ -1,3 +1,4 @@
+from collections import defaultdict
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -88,6 +89,138 @@ def extract_cell_number_from_path(file_path: Path) -> int:
             return int(part[1:])
 
     raise ValueError(f"Could not extract cell number from path: {file_path}")
+
+
+def build_icephys_tables(nwbfile: NWBFile, files_with_recordings: list[dict]) -> None:
+    """
+    Build intracellular electrophysiology hierarchical tables.
+
+    Creates the icephys metadata tables that organize recordings into a hierarchy:
+    - SimultaneousRecordingsTable: groups recordings per sweep
+    - SequentialRecordingsTable: groups sweeps per (cell, protocol)
+    - RepetitionsTable: groups all protocols per cell
+    - ExperimentalConditionsTable: groups cells by AIS status
+
+    Parameters
+    ----------
+    nwbfile : NWBFile
+        NWB file with intracellular recordings already added
+    files_with_recordings : list[dict]
+        List of file info dictionaries, each containing:
+        - 'cell_id': cell identifier (e.g., "C1")
+        - 'protocol': protocol abbreviation (SF, CS, ADP)
+        - 'ais_status': AIS status string
+        - 'recording_indices': list of intracellular recording indices from this file
+        - 'electrode_name': name of the electrode used
+    """
+    # Organize recordings by cell and protocol
+    cell_protocol_recordings = defaultdict(lambda: defaultdict(list))
+    cell_info = {}
+
+    for file_info in files_with_recordings:
+        cell_id = file_info["cell_id"]
+        protocol = file_info["protocol"]
+        recording_indices = file_info["recording_indices"]
+
+        cell_protocol_recordings[cell_id][protocol].extend(recording_indices)
+
+        # Store cell metadata (will be same for all files from this cell)
+        if cell_id not in cell_info:
+            cell_info[cell_id] = {
+                "ais_status": file_info["ais_status"],
+                "electrode_name": file_info["electrode_name"],
+            }
+
+    # Map protocol abbreviations to descriptive stimulus types
+    protocol_to_stimulus_type = {
+        "SF": "spontaneous_firing",
+        "CS": "current_steps",
+        "ADP": "after_depolarization",
+    }
+
+    # Add custom columns to tables BEFORE adding any data
+    # Get table objects (creates them if they don't exist)
+    seq_table = nwbfile.get_icephys_sequential_recordings()
+    rep_table = nwbfile.get_icephys_repetitions()
+    cond_table = nwbfile.get_icephys_experimental_conditions()
+
+    # SequentialRecordingsTable: add protocol abbreviation
+    seq_table.add_column(
+        name="protocol",
+        description="Protocol abbreviation (SF=Spontaneous Firing, CS=Current Steps, ADP=After Depolarization)",
+    )
+
+    # RepetitionsTable: add cell metadata
+    rep_table.add_column(
+        name="cell_id", description="Cell identifier (e.g., C1, C2, ...)"
+    )
+    rep_table.add_column(
+        name="ais_status", description="Axon initial segment component status"
+    )
+    rep_table.add_column(
+        name="electrode_name",
+        description="Name of the intracellular electrode used for this cell",
+    )
+
+    # ExperimentalConditionsTable: add AIS status
+    cond_table.add_column(
+        name="ais_component_status",
+        description="Experimental condition based on axon initial segment component presence",
+    )
+
+    # Build hierarchical tables bottom-up
+    # Level 2: SimultaneousRecordingsTable (one per sweep)
+    # Level 3: SequentialRecordingsTable (one per cell×protocol)
+    sequential_indices = defaultdict(
+        list
+    )  # cell_id -> list of sequential recording indices
+
+    for cell_id in sorted(cell_protocol_recordings.keys()):
+        for protocol in ["SF", "CS", "ADP"]:  # Process in consistent order
+            if protocol not in cell_protocol_recordings[cell_id]:
+                continue
+
+            recording_indices = cell_protocol_recordings[cell_id][protocol]
+
+            # Create one SimultaneousRecording per sweep
+            simultaneous_indices = []
+            for ir_index in recording_indices:
+                sim_index = nwbfile.add_icephys_simultaneous_recording(
+                    recordings=[ir_index]
+                )
+                simultaneous_indices.append(sim_index)
+
+            # Create one SequentialRecording per (cell, protocol) combination
+            seq_index = nwbfile.add_icephys_sequential_recording(
+                simultaneous_recordings=simultaneous_indices,
+                stimulus_type=protocol_to_stimulus_type[protocol],
+                protocol=protocol,  # Custom column
+            )
+            sequential_indices[cell_id].append(seq_index)
+
+    # Level 4: RepetitionsTable (one per cell)
+    repetition_to_ais = {}  # repetition_index -> ais_status
+
+    for cell_id in sorted(sequential_indices.keys()):
+        rep_index = nwbfile.add_icephys_repetition(
+            sequential_recordings=sequential_indices[cell_id],
+            cell_id=cell_id,  # Custom column
+            ais_status=cell_info[cell_id]["ais_status"],  # Custom column
+            electrode_name=cell_info[cell_id]["electrode_name"],  # Custom column
+        )
+        repetition_to_ais[rep_index] = cell_info[cell_id]["ais_status"]
+
+    # Level 5: ExperimentalConditionsTable (one per AIS status)
+    ais_conditions = defaultdict(list)
+    for rep_index, ais_status in repetition_to_ais.items():
+        ais_conditions[ais_status].append(rep_index)
+
+    # Create experimental conditions in consistent order
+    for ais_status in sorted(ais_conditions.keys()):
+        nwbfile.add_icephys_experimental_condition(
+            repetitions=ais_conditions[ais_status],
+            ais_component_status=ais_status,  # Custom column
+        )
 
 
 def get_cells_for_subject(subject_id: str, session_metadata_path: Path) -> list[dict]:
@@ -423,8 +556,10 @@ def convert_subject(
     # Add data from all files
     # Track sweep counters for each cell to avoid naming conflicts
     # Track files that fail during data reading
+    # Collect recording indices for building icephys tables
     cell_sweep_counters = defaultdict(int)
     data_read_failures = []
+    files_with_recordings = []
 
     for file_info in all_files:
         file_path = file_info["file_path"]
@@ -448,7 +583,7 @@ def convert_subject(
         protocol = file_info["protocol"]
 
         try:
-            add_icephys_data_from_neo_reader(
+            recording_indices = add_icephys_data_from_neo_reader(
                 nwbfile=nwbfile,
                 neo_reader=neo_reader,
                 electrode_name=electrode_name,
@@ -462,7 +597,18 @@ def convert_subject(
             # Update sweep counter for this cell
             nb_segments = neo_reader.header["nb_segment"][0]
             cell_sweep_counters[cell_id] += nb_segments
-        except (ValueError, OSError) as e:
+
+            # Store file info with recording indices for building icephys tables
+            files_with_recordings.append(
+                {
+                    "cell_id": cell_id,
+                    "protocol": protocol,
+                    "ais_status": file_info["ais_status"],
+                    "electrode_name": electrode_name,
+                    "recording_indices": recording_indices,
+                }
+            )
+        except (ValueError, OSError):
             # File data cannot be read (e.g., mmap errors)
             data_read_failures.append((file_path.name, cell_id))
 
@@ -502,6 +648,10 @@ def convert_subject(
                 reason=f"file_data_read_failed: {file_name} (cell {cell_id})",
                 severity="critical",
             )
+
+    # Build icephys hierarchical tables
+    if files_with_recordings:
+        build_icephys_tables(nwbfile, files_with_recordings)
 
     # Write NWB file
     output_folder_path.mkdir(parents=True, exist_ok=True)
