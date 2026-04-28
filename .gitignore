@@ -155,6 +155,7 @@ dmypy.json
 **.nwb
 
 **.ipynb
+!notebooks/001693_demo.ipynb
 
 # Data directory (symbolic link)
 /data
