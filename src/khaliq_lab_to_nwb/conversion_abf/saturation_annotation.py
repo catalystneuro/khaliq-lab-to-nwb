@@ -7,6 +7,7 @@ in NWB acquisition time series and annotate them in the invalid_times table.
 
 import numpy as np
 from pynwb import NWBFile
+from pynwb.epoch import TimeIntervals
 
 from khaliq_lab_to_nwb.conversion_abf.detect_saturation import (
     detect_saturation_segments,
@@ -47,8 +48,6 @@ def add_saturation_annotations(
     - time_series_name: Name of the TimeSeries
     - voltage_min: Minimum voltage (V) during the saturated interval
     - voltage_max: Maximum voltage (V) during the saturated interval
-    - reason: Set to "voltage_saturation_detected"
-    - severity: Set to "high"
 
     Examples
     --------
@@ -65,17 +64,17 @@ def add_saturation_annotations(
         # Get data and timing information
         data = np.array(series.data[:], dtype=np.float64)
         if series.timestamps is not None:
-            start_time = float(series.timestamps[0])
+            timestamps = np.array(series.timestamps[:], dtype=np.float64)
         else:
+            rate = float(series.rate)
             start_time = float(series.starting_time)
-        rate = float(series.rate)
+            timestamps = start_time + np.arange(data.size, dtype=np.float64) / rate
 
         # Detect saturation segments
         # Note: only voltage_threshold is actually used by detect_saturation_segments
         segments = detect_saturation_segments(
             data=data,
-            rate=rate,
-            start_time=start_time,
+            timestamps=timestamps,
             amp_factor=voltage_threshold,
         )
 
@@ -94,16 +93,25 @@ def add_saturation_annotations(
 
     # Add invalid_times table if saturation detected
     # Only annotate data that actually exists in the NWB file
+    # Sort by start_time to satisfy NWB best practices (time columns should be ascending)
+    saturation_intervals.sort(key=lambda x: x["start_time"])
+
     if saturation_intervals:
+        # Create invalid_times table with descriptive description
+        invalid_times = TimeIntervals(
+            name="invalid_times",
+            description=(
+                "Time intervals containing voltage saturation artifacts that should be excluded "
+                "from analysis. Saturation occurs when the recorded voltage exceeds the amplifier's "
+                "measurement range (detected as values beyond +/- 200 mV), causing the signal to "
+                "clip at the amplifier limits. During these intervals, the recorded voltage does "
+                "not reflect true membrane potential. Each interval includes a reference to the "
+                "affected time series and the extreme voltage values observed."
+            ),
+        )
+        nwbfile.invalid_times = invalid_times
+
         # Add custom columns to invalid_times table
-        nwbfile.add_invalid_times_column(
-            name="reason",
-            description="Type of corruption or artifact detected in the data",
-        )
-        nwbfile.add_invalid_times_column(
-            name="severity",
-            description="Severity level of the corruption",
-        )
         nwbfile.add_invalid_times_column(
             name="time_series",
             description="Reference to the TimeSeries where this invalid interval was detected",
@@ -126,8 +134,6 @@ def add_saturation_annotations(
             nwbfile.add_invalid_time_interval(
                 start_time=interval["start_time"],
                 stop_time=interval["stop_time"],
-                reason="voltage_saturation_detected",
-                severity="high",
                 time_series=interval["time_series"],
                 time_series_name=interval["time_series_name"],
                 voltage_min=interval["voltage_min"],

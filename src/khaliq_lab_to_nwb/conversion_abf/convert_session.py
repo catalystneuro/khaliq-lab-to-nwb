@@ -10,7 +10,7 @@ from pynwb.file import Subject
 from tqdm import tqdm
 
 from khaliq_lab_to_nwb.conversion_abf.icephys_neo_interface import (
-    add_icephys_data_from_neo_reader,
+    add_icephys_data_from_neo_readers,
 )
 from khaliq_lab_to_nwb.conversion_abf.protocol_epochs import add_protocol_epochs
 from khaliq_lab_to_nwb.conversion_abf.saturation_annotation import (
@@ -447,11 +447,13 @@ def convert_session(
         first_cell["animal_species"], first_cell["animal_species"]
     )
 
-    # Convert age from years to days in ISO 8601 format
+    # Age in ISO 8601 duration format. For subjects with unknown age, use the
+    # open-ended range "P0Y/" ("0 years or older") to annotate total uncertainty
+    # without making an unverified claim about a lower bound.
     if first_cell["age_years"] is not None:
-        age_iso = f"P{first_cell['age_years'] * 365:.0f}D"
+        age_iso = f"P{first_cell['age_years']}Y"
     else:
-        age_iso = None
+        age_iso = "P0Y/"
 
     # Count unique cells and protocols
     unique_cells = sorted(set(f["cell_id"] for f in all_files))
@@ -481,9 +483,6 @@ def convert_session(
         "components to investigate the role of AIS morphology in intrinsic excitability."
     )
 
-    # Create session identifier with date
-    # Format date as YYYY-MM-DD for identifier
-
     date_for_id = session_start_time.strftime("%Y%m%d")
 
     nwbfile = NWBFile(
@@ -492,10 +491,11 @@ def convert_session(
             f"{first_cell['neuron_type']} neuron(s) in {first_cell['anatomical_region']} "
             f"of subject {subject_id} on {recording_date}"
         ),
-        identifier=f"subject_{subject_id.replace('#', '')}_{date_for_id}",
+        identifier=f"subject{subject_id.replace('#', '')}++{date_for_id}",
+        session_id=f"subject{subject_id.replace('#', '')}++{date_for_id}",
         session_start_time=session_start_time,
-        experimenter=["Khaliq, Zayd", "Sansalone, Lorenze"],
-        lab="Cellular Neurophysiology Section",
+        experimenter=["Khaliq, Zayd", "Sansalone, Lorenzo"],
+        lab="Khaliq Lab",
         institution=(
             "National Institute of Neurological Disorders and Stroke, National Institutes of Health"
         ),
@@ -508,11 +508,18 @@ def convert_session(
         protocol=protocol_narrative,
         keywords=[
             first_cell["neuron_type"],
+            "dopaminergic neuron",
             "substantia nigra pars compacta",
-            "patch-clamp",
-            "intracellular",
-            "current-clamp",
+            "midbrain",
             "axon initial segment",
+            "patch-clamp",
+            "intracellular electrophysiology",
+            "current-clamp",
+            "intrinsic excitability",
+            "pacemaking",
+            "spontaneous firing",
+            "non-human primate",
+            "Macaca mulatta",
         ]
         + unique_protocols
         + ais_statuses,
@@ -522,7 +529,10 @@ def convert_session(
     # Step 6: Create device (shared across all electrodes)
     device = nwbfile.create_device(
         name="MultiClamp700B",
-        description="Molecular Devices MultiClamp 700B amplifier",
+        description=(
+            "Molecular Devices MultiClamp 700B amplifier used for whole-cell "
+            "patch-clamp recordings in current-clamp mode"
+        ),
         manufacturer="Molecular Devices",
     )
 
@@ -570,69 +580,46 @@ def convert_session(
 
         cell_to_electrode[cell_id] = electrode_name
 
-    # Add data from all files
-    # Track sweep counters for each cell to avoid naming conflicts
-    # Collect recording indices for building icephys tables
-    cell_sweep_counters = defaultdict(int)
+    # Group files by (cell, protocol) so each group becomes one concatenated
+    # CurrentClampSeries (and one CurrentClampStimulusSeries when applicable),
+    # with individual sweeps exposed as regions in the IntracellularRecordingsTable.
+    grouped_files: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for file_info in all_files:
+        grouped_files[(file_info["cell_id"], file_info["protocol"])].append(file_info)
+
+    # Collect recording indices for building icephys tables and protocol epochs
     files_with_recordings = []
 
-    for file_info in all_files:
-        file_path = file_info["file_path"]
-        cell_id = file_info["cell_id"]
+    for (cell_id, protocol), group_files in grouped_files.items():
         electrode_name = cell_to_electrode[cell_id]
+        ais_status = group_files[0]["ais_status"]
+        ais_string = "AIS" if ais_status == "with AIS component" else "NOAIS"
 
-        # Calculate time offset relative to session start
-        file_rec_time = file_info["rec_datetime"]
-        time_offset = (file_rec_time - earliest_time).total_seconds()
-
-        # Use the already-opened neo_reader
-        neo_reader = file_info["neo_reader"]
-
-        # Get the current sweep counter for this cell
-        sweep_offset = cell_sweep_counters[cell_id]
-
-        # Determine AIS status string for naming
-        ais_string = (
-            "AIS" if file_info["ais_status"] == "with AIS component" else "NOAIS"
-        )
-        protocol = file_info["protocol"]
+        # Sort group files by recording time so the concatenated series is chronological
+        group_files = sorted(group_files, key=lambda f: f["rec_datetime"])
+        neo_readers = [f["neo_reader"] for f in group_files]
+        time_offsets = [
+            (f["rec_datetime"] - earliest_time).total_seconds() for f in group_files
+        ]
 
         try:
-            recording_indices = add_icephys_data_from_neo_reader(
-                nwbfile=nwbfile,
-                neo_reader=neo_reader,
-                electrode_name=electrode_name,
-                time_offset=time_offset,
-                cell_id=cell_id,
-                sweep_offset=sweep_offset,
-                ais_string=ais_string,
-                protocol=protocol,
+            recording_indices, epoch_start_time, epoch_stop_time = (
+                add_icephys_data_from_neo_readers(
+                    nwbfile=nwbfile,
+                    neo_readers=neo_readers,
+                    time_offsets=time_offsets,
+                    electrode_name=electrode_name,
+                    cell_id=cell_id,
+                    ais_string=ais_string,
+                    protocol=protocol,
+                )
             )
 
-            # Update sweep counter for this cell
-            nb_segments = neo_reader.header["nb_segment"][0]
-            cell_sweep_counters[cell_id] += nb_segments
-
-            # Calculate timing for this protocol recording
-            # Get the first and last sweep times from the neo reader
-            first_sweep_start = neo_reader._segment_t_start(block_index=0, seg_index=0)
-            last_sweep_start = neo_reader._segment_t_start(
-                block_index=0, seg_index=nb_segments - 1
-            )
-            last_sweep_duration = neo_reader._segment_t_stop(
-                block_index=0, seg_index=nb_segments - 1
-            )
-
-            # Absolute times including time offset
-            epoch_start_time = first_sweep_start + time_offset
-            epoch_stop_time = last_sweep_duration + time_offset
-
-            # Store file info with recording indices for building icephys tables and epochs
             files_with_recordings.append(
                 {
                     "cell_id": cell_id,
                     "protocol": protocol,
-                    "ais_status": file_info["ais_status"],
+                    "ais_status": ais_status,
                     "electrode_name": electrode_name,
                     "recording_indices": recording_indices,
                     "start_time": epoch_start_time,
@@ -640,8 +627,11 @@ def convert_session(
                 }
             )
         except (ValueError, OSError) as e:
-            # File data cannot be read (e.g., mmap errors) - skip it
-            print(f"Warning: Skipping data from {file_path.name} - read error: {e}")
+            file_names = ", ".join(f["file_path"].name for f in group_files)
+            print(
+                f"Warning: Skipping data from group cell={cell_id} protocol={protocol} "
+                f"({file_names}) - read error: {e}"
+            )
 
     # Detect and annotate voltage saturation in all acquisition time series
     add_saturation_annotations(

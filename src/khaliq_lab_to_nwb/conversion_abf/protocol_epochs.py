@@ -6,6 +6,7 @@ organizing recordings by their temporal structure (SF, CS, ADP protocol sequence
 """
 
 from pynwb import NWBFile
+from pynwb.epoch import TimeIntervals
 
 
 def add_protocol_epochs(
@@ -66,6 +67,20 @@ def add_protocol_epochs(
         "CS": "Current Steps: Response to stepwise current injection of varying amplitudes",
         "ADP": "After Depolarization: Post-stimulus depolarization following current injection",
     }
+
+    # Create epochs table with descriptive description before adding columns
+    epochs = TimeIntervals(
+        name="epochs",
+        description=(
+            "Temporal intervals marking when each experimental protocol was performed on each cell. "
+            "Each epoch spans all sweeps (repeated trials) of a single protocol recording. "
+            "Three protocols were used: SF (Spontaneous Firing) captures baseline intrinsic firing "
+            "patterns without current injection; CS (Current Steps) tests neuronal excitability with "
+            "stepwise current injections of varying amplitudes; ADP (After Depolarization) examines "
+            "membrane dynamics following brief current pulses."
+        ),
+    )
+    nwbfile.epochs = epochs
 
     # Add custom columns to epochs table
     nwbfile.add_epoch_column(

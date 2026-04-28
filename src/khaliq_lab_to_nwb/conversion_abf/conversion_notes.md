@@ -174,15 +174,94 @@ Only ABF files should be processed. Bruker files were not delivered correctly (s
 - If files are renamed, they become unreadable/corrupted
 - This issue occurred multiple times during data sharing (March 25, May 31, June 12)
 
-### Data Corruption
-- Do not try to read corrupted ABF files
-- Just annotate that there are corrupted parts using `invalid_times` table
-- Some files have blocks of corrupted data (high amplitude noise) in specific sweeps
-- Corruption identified in initial samples:
-  - L_S1C3/ADP_21610017.abf – 2 sweeps
-  - L_S1C3/SF_21610014.abf – 1 sweep
-  - L_S4C1/ADP_21610043.abf – 1 sweep
-  - L_S4C1/SF_21610041.abf – 7 sweeps
+### Data Corruption and Quality Annotations
+
+Some recordings contain artifacts where the voltage signal becomes unreliable. These are automatically detected and annotated in the NWB `invalid_times` table.
+
+#### Types of Data Issues
+
+1. **Voltage Saturation:** The recording amplifier has physical voltage limits. When the membrane potential exceeds these limits (due to large action potentials, artifacts, or electrode issues), the recorded voltage "clips" at the amplifier's maximum/minimum values. This saturated signal does not reflect true membrane potential.
+
+2. **File-level Corruption:** Some ABF files have corrupted data blocks that cannot be read. These files are skipped during conversion.
+
+#### Automatic Saturation Detection
+
+The conversion automatically detects voltage saturation using the following method:
+
+**Detection Algorithm:**
+1. Scan all voltage recordings in the NWB file
+2. Identify time intervals where voltage exceeds +/- 200 mV (absolute threshold)
+3. Merge adjacent saturated samples into continuous intervals
+4. Add each interval to the `invalid_times` table with metadata
+
+**Implementation:**
+- Detection algorithm: [`detect_saturation.py`](detect_saturation.py) - `detect_saturation_segments()` function
+- NWB annotation: [`saturation_annotation.py`](saturation_annotation.py) - `add_saturation_annotations()` function
+- Called from: [`convert_session.py:647`](convert_session.py#L647)
+
+**Why 200 mV threshold?**
+- Normal membrane potentials range from approximately -90 mV to +50 mV
+- Action potential peaks rarely exceed +60 mV
+- Values beyond +/- 200 mV indicate amplifier saturation or severe artifacts
+
+#### Invalid Times Table Structure
+
+The `invalid_times` table contains one row per detected saturation interval:
+
+| Column | Description |
+|--------|-------------|
+| `start_time` | Start of the invalid interval (seconds from session start) |
+| `stop_time` | End of the invalid interval (seconds from session start) |
+| `time_series` | Reference to the affected voltage recording |
+| `time_series_name` | Name of the affected recording (e.g., "C3_AIS_ADP_Sweep0001_Vm") |
+| `voltage_min` | Minimum voltage (V) observed during the interval |
+| `voltage_max` | Maximum voltage (V) observed during the interval |
+
+#### How to Use Invalid Times in Analysis
+
+When analyzing the data, researchers should:
+
+1. **Query the invalid_times table** to identify problematic intervals
+2. **Exclude these intervals** from spike detection, membrane potential analysis, etc.
+3. **Check the time_series_name** to identify which specific recordings are affected
+
+**Example (Python):**
+```python
+import pynwb
+
+with pynwb.NWBHDF5IO('session.nwb', 'r') as io:
+    nwbfile = io.read()
+
+    if nwbfile.invalid_times is not None:
+        invalid_df = nwbfile.invalid_times.to_dataframe()
+        print(f"Found {len(invalid_df)} invalid intervals")
+
+        # Filter out invalid times from analysis
+        for _, row in invalid_df.iterrows():
+            print(f"  {row['time_series_name']}: {row['start_time']:.2f}s - {row['stop_time']:.2f}s")
+```
+
+#### Files with Detected Saturation
+
+| NWB File | Invalid Intervals |
+|----------|-------------------|
+| subject_1_20210610.nwb | 0 |
+| subject_2_20210927.nwb | 47 |
+| subject_2_20210928.nwb | 8 |
+| subject_2_20210929.nwb | 7 |
+| subject_3_20211103.nwb | 1 |
+| subject_3_20211104.nwb | 3 |
+| subject_4_20211207.nwb | 0 |
+| subject_5_20220118.nwb | 0 |
+| subject_6_20220420.nwb | 3 |
+
+#### Historical Corruption Notes
+
+Corruption was identified in initial data samples:
+- L_S1C3/ADP_21610017.abf - 2 sweeps affected
+- L_S1C3/SF_21610014.abf - 1 sweep affected
+- L_S4C1/ADP_21610043.abf - 1 sweep affected
+- L_S4C1/SF_21610041.abf - 7 sweeps affected
 
 ### Reading Tools
 - Primary: pyABF (Python package for reading ABF files)
@@ -344,7 +423,7 @@ Required fields:
 - Subject unique ID
 - Species (e.g., Macaca mulatta)
 - Sex
-- Age (in years, converted to days for NWB)
+- Age: written as an ISO 8601 duration (e.g. `P9.8Y`). For subjects missing age in the source spreadsheet (currently #4 and #6), the conversion writes `age="P0Y/"` — an NWB-schema-accepted open-ended range meaning "0 years or older" — to represent total uncertainty without making an unverified lower-bound claim.
 
 ### Cell Features
 - **AIS** (Axon Initial Segment) - Specific branching of the soma that turns into an axon; this is a cell feature
@@ -360,6 +439,30 @@ Required fields:
 - Initial: Lorenzo Sansalone
 - Current: Zayd Khaliq (khaliqzm@nih.gov) - write access granted July 11, 2025
 
+## DANDI Archive
+
+### Dandiset
+- **ID:** [DANDI:001693](https://dandiarchive.org/dandiset/001693)
+- **Name:** Khaliq Embargo 2026
+- **Status:** Embargoed (not for public release)
+- **First upload:** April 23, 2026
+- **Assets:** 9 NWB files, one per (subject, recording date), total 0.52 GB
+
+### Files on DANDI
+Files are organized by subject using the dandi organize layout `sub-#N/sub-#N_ses-subjectN++YYYYMMDD_icephys.nwb`:
+
+| Subject | Session | Size |
+|---------|---------|------|
+| sub-#1 | subject1++20210610 | 44.4 MB |
+| sub-#2 | subject2++20210927 | 251.6 MB |
+| sub-#2 | subject2++20210928 | 105.2 MB |
+| sub-#2 | subject2++20210929 | 54.6 MB |
+| sub-#3 | subject3++20211103 | 13.9 MB |
+| sub-#3 | subject3++20211104 | 14.8 MB |
+| sub-#4 | subject4++20211207 | 17.3 MB |
+| sub-#5 | subject5++20220118 | 16.4 MB |
+| sub-#6 | subject6++20220420 | 18.2 MB |
+
 ## Timeline
 
 ### Key Dates
@@ -371,6 +474,7 @@ Required fields:
 - **May 31, 2025:** Second round of corruption issues identified
 - **June 13, 2025:** Lorenzo's last day at NIH
 - **July 2025:** Zayd taking over data sharing responsibilities
+- **April 23, 2026:** First upload to DANDI:001693 (embargoed)
 
 ## Outstanding Items
 - Calcium imaging data still being organized (as of May 13, 2025)

@@ -71,8 +71,7 @@ def _load_series(
 
 def detect_saturation_segments(
     data: np.ndarray,
-    rate: float,
-    start_time: float,
+    timestamps: np.ndarray,
     amp_factor: float = 0.2,
 ) -> list[tuple[float, float, float, float]]:
     """
@@ -82,16 +81,17 @@ def detect_saturation_segments(
     indicate amplifier saturation or data corruption.
 
     Segments are identified by grouping voltage exceedances that occur within 100ms
-    of each other. Single-point spikes are filtered out.
+    of each other (in real time, derived from the timestamps array). Single-point
+    spikes are filtered out. Using timestamps rather than sample distance means
+    saturated regions on opposite sides of a sweep boundary are split correctly,
+    even when the underlying series concatenates multiple sweeps.
 
     Parameters
     ----------
     data : np.ndarray
         Voltage samples (volts).
-    rate : float
-        Sampling rate in Hz.
-    start_time : float
-        Starting time offset of the series in seconds.
+    timestamps : np.ndarray
+        Per-sample timestamps in seconds, same length as ``data``.
     amp_factor : float
         Absolute voltage threshold in volts (default 0.2 V = 200 mV).
         Values exceeding ±amp_factor are considered saturated.
@@ -120,18 +120,17 @@ def detect_saturation_segments(
     if len(extreme_indices) == 0:
         return []
 
-    # Group exceedances into segments based on temporal proximity
-    # Points within 100ms of each other belong to the same corrupted segment
+    # Group exceedances into segments based on temporal proximity (100ms in real time)
+    gap_threshold_seconds = 0.1
     segments: list[list[int]] = []
     current_segment = [extreme_indices[0]]
-    gap_threshold_samples = int(0.1 * rate)  # 100ms in samples
 
     for idx in extreme_indices[1:]:
-        if idx - current_segment[-1] <= gap_threshold_samples:
-            # This point is within 100ms of the previous one - same segment
+        prev_idx = current_segment[-1]
+        time_gap = float(timestamps[idx] - timestamps[prev_idx])
+        if time_gap <= gap_threshold_seconds:
             current_segment.append(idx)
         else:
-            # Gap > 100ms - start a new segment
             segments.append(current_segment)
             current_segment = [idx]
 
@@ -162,9 +161,8 @@ def detect_saturation_segments(
             seg_min -= epsilon
             seg_max += epsilon
 
-        # Convert indices to absolute times
-        time_start = start_time + first_idx / rate
-        time_end = start_time + last_idx / rate
+        time_start = float(timestamps[first_idx])
+        time_end = float(timestamps[last_idx])
 
         results.append((time_start, time_end, seg_min, seg_max))
 
@@ -187,14 +185,16 @@ def analyze_file(
 
             full_data = np.array(series.data[:], dtype=np.float64)
             if series.timestamps is not None:
-                start_time = float(series.timestamps[0])
+                full_timestamps = np.array(series.timestamps[:], dtype=np.float64)
             else:
+                rate = float(series.rate)
                 start_time = float(series.starting_time)
-            rate = float(series.rate)
+                full_timestamps = (
+                    start_time + np.arange(full_data.size, dtype=np.float64) / rate
+                )
             rectangles = detect_saturation_segments(
                 data=full_data,
-                rate=rate,
-                start_time=start_time,
+                timestamps=full_timestamps,
                 amp_factor=amp_factor,
             )
             rel_times, display_values, series_start = _load_series(
